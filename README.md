@@ -58,6 +58,7 @@ The orchestrator runs Kane CLI and Claude Code as local processes, so the full w
 | AcmeDesk demo app | ✅ Built (`apps/acmedesk`) |
 | AcmeDesk Docs | ✅ Built (`apps/docs`) |
 | Orchestrator: discovery, extraction, Kane runner, evidence, classification (4a) | ✅ Built (`apps/orchestrator`) |
+| KaneVerity interface (4b) | ✅ Built (`apps/web`) |
 | Claude correction and retest | ⏳ Not started |
 | KaneVerity UI | ⏳ Not started |
 
@@ -151,6 +152,23 @@ npm run test:orchestrator   # unit, security and fake-Kane end-to-end tests (no 
 - **Privacy:** raw Kane output, stderr and evidence packs stay in `data/runs/<id>/private/` (git-ignored, never served). The UI gets an allow-listed, scrubbed record, and a screenshot is shown only if its step was on the demo app origin.
 - **Credits:** one Kane run at a time, with a hard limit (default 100) tracked in `data/credits.json`. Requests that could exceed it are refused before Kane starts.
 - **API protection:** loopback only, a Host-header check, and every mutating request needs `X-KaneVerity: 1`, a JSON body and an allowed Origin. No CORS headers are sent.
+
+## KaneVerity interface
+
+A React, TypeScript, Vite and Tailwind app at `http://127.0.0.1:5173`. It calls the orchestrator through the Vite `/api` proxy.
+
+```bash
+npm run dev:acmedesk        # terminal 1: app on :5174
+npm run dev:docs            # terminal 2: docs on :5175
+npm run dev:orchestrator    # terminal 3: API on :4000 (start it from a normal terminal)
+npm run dev:web             # terminal 4: UI on :5173
+```
+
+- **Dashboard:** connected project, readiness (docs, app, Kane logged in), the **KaneVerity credit budget** (limit, used, remaining), status counts, the latest finding and recent runs. The TestMu account balance and identity are never shown.
+- **Connect:** docs and app URLs. Live verification is limited to the local AcmeDesk demo.
+- **Tutorials:** discovered tutorials with extracted steps, expected outcomes and source lines. Select tutorials, then confirm the credit reservation, and Kane runs one at a time.
+- **Run:** live progress (Server-Sent Events, falling back to polling; `?transport=poll` forces polling), the status with a plain-language explanation, documented steps and outcomes with source references and matched Kane checks, approved screenshots, evidence validation status, and the exact instructions sent to Kane. Evidence pack paths are never shown, only a run reference.
+- **Security:** Vite's default CORS is turned off, and the orchestrator rejects any request that carries a non-UI Origin, so other local pages can't call or read the API.
 
 ## Security notes
 

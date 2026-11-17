@@ -76,16 +76,16 @@ function kaneCommand(entry: string, cmd: string): Promise<{ code: number | null;
   });
 }
 
-let kaneStatusCache: { at: number; value: { installed: boolean; loggedIn: boolean; balance: number | null } } | null = null;
+// The TestMu account balance and identity are never sent to the UI. The UI shows
+// only the KaneVerity credit budget (limit / used / remaining) from the ledger.
+let kaneStatusCache: { at: number; value: { installed: boolean; loggedIn: boolean } } | null = null;
 async function kaneStatus() {
   if (kaneStatusCache && Date.now() - kaneStatusCache.at < 60_000) return kaneStatusCache.value;
   const entry = config.kane.entry;
-  let value = { installed: !!entry, loggedIn: false, balance: null as number | null };
+  let value = { installed: !!entry, loggedIn: false };
   if (entry) {
     const who = await kaneCommand(entry, 'whoami'); // only the exit code is used; identity is never stored or shown
-    const bal = await kaneCommand(entry, 'balance');
-    const m = /Available credits:\s*([0-9]+(?:\.[0-9]+)?)/.exec(bal.out);
-    value = { installed: true, loggedIn: who.code === 0, balance: m ? Math.floor(Number(m[1])) : null };
+    value = { installed: true, loggedIn: who.code === 0 };
   }
   kaneStatusCache = { at: Date.now(), value };
   return value;
@@ -130,10 +130,12 @@ export function createOrchestrator(runner = new Runner()): Server {
       const url = new URL(req.url ?? '/', 'http://orchestrator.invalid');
       const method = req.method ?? 'GET';
 
+      // Any request that carries a browser Origin must come from the KaneVerity UI.
+      // (Same-origin GETs, EventSource and <img> requests from the UI send no Origin.)
+      const origin = req.headers.origin;
+      if (origin && !config.uiOrigins.includes(origin)) throw new HttpError(403, 'Origin not allowed.');
       if (method !== 'GET' && method !== 'HEAD') {
         if (req.headers['x-kaneverity'] !== '1') throw new HttpError(403, 'Missing X-KaneVerity header.');
-        const origin = req.headers.origin;
-        if (origin && !config.uiOrigins.includes(origin)) throw new HttpError(403, 'Origin not allowed.');
       }
 
       const p = url.pathname;
@@ -210,8 +212,10 @@ export function createOrchestrator(runner = new Runner()): Server {
         const index = (await readJson<string[]>(dataPath('runs-index.json'))) ?? [];
         const list = [];
         for (const id of index.slice(-50).reverse()) {
-          const pub = await readJson<Record<string, unknown>>(runDir(id, 'public.json'));
-          if (pub) list.push(pub);
+          if (!RUN_ID_PATTERN.test(id)) continue;
+          // Rebuild from the private record so current redaction rules always apply.
+          const rec = await runner.load(id);
+          if (rec) list.push(publicRecord(rec));
         }
         return json(res, 200, list);
       }
@@ -223,10 +227,11 @@ export function createOrchestrator(runner = new Runner()): Server {
         const sub = runMatch[2];
 
         if (method === 'GET' && !sub) {
-          const live = runner.get(runId);
-          const pub = live ? publicRecord(live) : await readJson(runDir(runId, 'public.json'));
-          if (!pub) throw new HttpError(404, 'Run not found.');
-          return json(res, 200, pub);
+          // Always rebuilt from the private record so current redaction rules apply,
+          // including to runs saved by older versions.
+          const rec = await runner.load(runId);
+          if (!rec) throw new HttpError(404, 'Run not found.');
+          return json(res, 200, publicRecord(rec));
         }
 
         if (method === 'POST' && sub === 'cancel') {
@@ -235,14 +240,18 @@ export function createOrchestrator(runner = new Runner()): Server {
         }
 
         if (method === 'GET' && sub === 'events') {
-          if (!runner.get(runId) && !(await readJson(runDir(runId, 'public.json')))) throw new HttpError(404, 'Run not found.');
+          const initial = await runner.load(runId);
+          if (!initial) throw new HttpError(404, 'Run not found.');
           res.writeHead(200, { ...HEADERS, 'Content-Type': 'text/event-stream', Connection: 'keep-alive' });
+          res.write(`data: ${JSON.stringify(publicRecord(initial))}\n\n`);
           const send = () => {
             const live = runner.get(runId);
             if (live) res.write(`data: ${JSON.stringify(publicRecord(live))}\n\n`);
           };
-          send();
           const onEvent = (id: string) => id === runId && send();
+          // Comment heartbeat keeps proxies from buffering or closing an idle stream.
+          const heartbeat = setInterval(() => res.write(': keep-alive\n\n'), 15_000);
+          req.on('close', () => clearInterval(heartbeat));
           runner.on('progress', onEvent);
           runner.on('update', onEvent);
           req.on('close', () => {

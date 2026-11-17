@@ -49,8 +49,23 @@ function stripEndPunct(s: string): string {
   return s.replace(/[.!?:;,\s]+$/, '');
 }
 
+/** Light plural folding so "keys"/"key" and "projects"/"project" compare equal. */
+function fold(w: string): string {
+  return w.length > 3 && w.endsWith('s') && !w.endsWith('ss') ? w.slice(0, -1) : w;
+}
+
 function words(s: string): Set<string> {
-  return new Set(norm(s).split(/[^a-z0-9_]+/).filter((w) => w.length > 2 && !STOP.has(w)));
+  return new Set(
+    norm(s)
+      .split(/[^a-z0-9_]+/)
+      .filter((w) => w.length > 2 && !STOP.has(w))
+      .map(fold),
+  );
+}
+
+/** Words of an outcome outside its quoted values (what the outcome is about). */
+function contextWords(outcomeKane: string): Set<string> {
+  return words(outcomeKane.replace(/'[^']+'/g, ' '));
 }
 
 /** Quoted values in Kane text: 'Label' (single quotes are KaneVerity's convention). */
@@ -86,13 +101,37 @@ function evidenceAssertions(steps: EvidenceStep[]): Assertion[] {
     .map((s) => ({ source: 'evidence' as const, text: s.summary.replace(/^assert:\s*/i, ''), extracted: null, passed: s.status === 'passed' }));
 }
 
+/** Compare values ignoring quote marks and spacing, e.g. 'Project "X" created.' == Project X created */
+function valueForm(s: string): string {
+  return norm(s).replace(/["']/g, '').replace(/\s+/g, ' ').trim();
+}
+
+/** Assertion text with its own quoted values removed (what the check is about). */
+function outsideQuotes(s: string): string {
+  return norm(s).replace(/'[^']*'/g, ' ').replace(/"[^"]*"/g, ' ');
+}
+
 /** Score how well an assertion covers an outcome. 0 = no match. */
 function matchScore(outcomeKane: string, assertion: Assertion): number {
-  const hay = norm(`${assertion.text} ${assertion.extracted ?? ''}`);
-  const quoted = quotedValues(outcomeKane).map((q) => stripEndPunct(norm(q)));
+  const raw = `${assertion.text} ${assertion.extracted ?? ''}`;
+  const hay = norm(raw);
+  const quoted = quotedValues(outcomeKane).map((q) => stripEndPunct(valueForm(q)));
   if (quoted.length) {
-    const allPresent = quoted.every((q) => hay.includes(q));
-    return allPresent ? 10 + quoted.length : 0;
+    // Every quoted value must appear word for word (quote marks ignored)...
+    const hayValues = valueForm(raw);
+    if (!quoted.every((q) => hayValues.includes(q))) return 0;
+    // ...and, if the outcome says where/what (e.g. "listed in the projects
+    // table"), at least one of those context words must appear too. This stops
+    // one assertion about a value from also "proving" a different outcome that
+    // mentions the same value.
+    const ctx = contextWords(outcomeKane);
+    if (ctx.size === 0) return 10 + quoted.length;
+    // Context must come from the assertion's own wording, not from inside a
+    // quoted value it checks (e.g. "project" inside 'Project "X" created.').
+    const aw = words(outsideQuotes(raw));
+    let hits = 0;
+    for (const w of ctx) if (aw.has(w)) hits++;
+    return hits === 0 ? 0 : 10 + quoted.length + hits;
   }
   const ow = words(outcomeKane);
   if (ow.size === 0) return 0;
@@ -104,29 +143,37 @@ function matchScore(outcomeKane: string, assertion: Assertion): number {
 }
 
 /**
- * Match each outcome to a distinct assertion. An outcome is only matched when
- * exactly one best candidate exists; ties leave it unmatched.
+ * Match each outcome to a distinct assertion, conservatively:
+ *  - an outcome's best-scoring assertion must be unique (no ties);
+ *  - an assertion that is the best match for two outcomes proves neither.
+ * Anything ambiguous is left unmatched, which prevents a PASSED result.
  */
 function matchOutcomes(t: Tutorial, assertions: Assertion[], notes: string[]): (Assertion | null)[] {
-  const used = new Set<number>();
-  return t.outcomes.map((o) => {
-    const scored = assertions
-      .map((a, i) => ({ i, s: used.has(i) ? 0 : matchScore(o.kaneText, a), passed: a.passed }))
-      .filter((x) => x.s > 0)
-      .sort((a, b) => b.s - a.s || Number(b.passed) - Number(a.passed));
-    if (scored.length === 0) {
+  const best = t.outcomes.map((o) => {
+    const row = assertions.map((a) => matchScore(o.kaneText, a));
+    const max = Math.max(0, ...row);
+    if (max === 0) return { ai: -1, score: 0, reason: 'none' as const };
+    const top = row.flatMap((s, ai) => (s === max ? [ai] : []));
+    return top.length === 1 ? { ai: top[0], score: max, reason: 'ok' as const } : { ai: -1, score: max, reason: 'tie' as const };
+  });
+  const claims = new Map<number, number>();
+  for (const b of best) if (b.ai >= 0) claims.set(b.ai, (claims.get(b.ai) ?? 0) + 1);
+  return best.map((b, i) => {
+    const o = t.outcomes[i];
+    if (b.reason === 'none') {
       notes.push(`Outcome ${o.index}: no Kane assertion matched "${o.text}".`);
       return null;
     }
-    const top = scored.filter((x) => x.s === scored[0].s);
-    const distinctPassStates = new Set(top.map((x) => x.passed));
-    if (top.length > 1 && distinctPassStates.size > 1) {
-      notes.push(`Outcome ${o.index}: ${top.length} equally good assertions disagree; not matched.`);
+    if (b.reason === 'tie') {
+      notes.push(`Outcome ${o.index}: more than one Kane assertion matched equally well; not matched.`);
       return null;
     }
-    used.add(top[0].i);
-    notes.push(`Outcome ${o.index}: matched Kane assertion "${assertions[top[0].i].text.slice(0, 120)}" (score ${top[0].s}).`);
-    return assertions[top[0].i];
+    if ((claims.get(b.ai) ?? 0) > 1) {
+      notes.push(`Outcome ${o.index}: its best Kane assertion is also the best match for another outcome; not matched.`);
+      return null;
+    }
+    notes.push(`Outcome ${o.index}: matched Kane assertion "${assertions[b.ai].text.slice(0, 120)}" (score ${b.score}).`);
+    return assertions[b.ai];
   });
 }
 
@@ -208,9 +255,13 @@ export function classify(input: ClassifyInput): Classification {
     if (offOrigin.length) {
       return result('NEEDS_REVIEW', 'left_app_origin', `Kane reported success but visited pages outside the application (${offOrigin.join(', ')}).`, { stepResults: steps('passed') });
     }
-    // Prefer memory records (they carry extracted values); fall back to evidence assert steps.
+    // Use ONE source of assertions, never both: memory records and evidence
+    // assert steps describe the same checks, so combining them would create
+    // duplicates that could make one check appear to prove two outcomes.
+    // Memory records are preferred (they carry extracted values).
     const memory = assertions.filter((a) => a.source === 'memory');
-    const pool = memory.length >= t.outcomes.length ? memory : assertions;
+    const pool = memory.length > 0 ? memory : assertions.filter((a) => a.source === 'evidence');
+    notes.push(`Assertion source: ${memory.length > 0 ? `${memory.length} Kane memory record(s)` : `${pool.length} evidence assert step(s)`} for ${t.outcomes.length} documented outcome(s).`);
     const matched = matchOutcomes(t, pool, notes);
     const outcomeResults: OutcomeResult[] = t.outcomes.map((o, i) => {
       const a = matched[i];

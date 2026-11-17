@@ -89,6 +89,63 @@ test('real: passing run missing one documented outcome check -> NEEDS_REVIEW', (
   assert.equal(c.outcomeResults[1].status, 'not_checked');
 });
 
+// ---- Create a project: assertion mapping (synthetic memory records) ----
+
+const CREATE_STEPS = ["On the 'Dashboard', click 'Projects' in the sidebar.", "Click 'New project'.", "In 'Project name', enter 'Docs Demo Project'.", "Click 'Create project'."];
+const CREATE_OUTCOMES = ["The message 'Project \"Docs Demo Project\" created.' appears.", "'Docs Demo Project' is listed in the projects table."];
+
+function passingRun(memory: Record<string, { query?: string; condition?: string; reasoning?: string; extracted_value?: unknown }>, evidenceAsserts: string[] = []): ClassifyInput {
+  const app = 'http://127.0.0.1:5174';
+  return {
+    tutorial: tutorial(CREATE_STEPS, CREATE_OUTCOMES, 'create-a-project'),
+    appOrigin: app,
+    preflight: { ok: true },
+    exitCode: 0,
+    runEnd: { type: 'run_end', status: 'passed', reason_code: 'success.complete', context: { memory } },
+    progress: [],
+    evidenceSteps: evidenceAsserts.map((s, i) => ({ ordinal: i + 1, id: `0-${i + 1}`, kind: 'assert', status: 'passed', summary: `assert: ${s}`, url: `${app}/projects` })),
+  };
+}
+
+const MSG = { query: "whether the message 'Project \"Docs Demo Project\" created.' is visible", condition: "the message 'Project \"Docs Demo Project\" created.' appears", reasoning: "value: 'true'; equals 'true' -> PASS", extracted_value: 'true' };
+const ROW = { query: "whether 'Docs Demo Project' is listed in the projects table", condition: "'Docs Demo Project' is listed in the projects table", reasoning: "value: 'true'; equals 'true' -> PASS", extracted_value: 'true' };
+
+test('create-a-project: two distinct passing assertions -> PASSED, one per outcome', () => {
+  const c = classify(passingRun({ msg: MSG, row: ROW }));
+  assert.equal(c.status, 'PASSED');
+  assert.match(c.outcomeResults[0].assertion!.query, /created/);
+  assert.match(c.outcomeResults[1].assertion!.query, /projects table/);
+});
+
+test('create-a-project: only the message was asserted -> NEEDS_REVIEW (the table outcome is not proven by the message check)', () => {
+  const c = classify(passingRun({ msg: MSG }));
+  assert.equal(c.status, 'NEEDS_REVIEW');
+  assert.equal(c.outcomeResults[0].status, 'passed');
+  assert.equal(c.outcomeResults[1].status, 'not_checked');
+});
+
+test('create-a-project: memory + duplicate evidence assert steps are never combined to fake a second proof', () => {
+  // One real check, recorded both in memory and as an evidence assert step.
+  const c = classify(passingRun({ msg: MSG }, [MSG.condition]));
+  assert.equal(c.status, 'NEEDS_REVIEW');
+  assert.ok(c.matchingNotes.some((n) => /Assertion source: 1 Kane memory record/.test(n)));
+});
+
+test('create-a-project: message asserted without its exact text -> NEEDS_REVIEW', () => {
+  const loose = { ...MSG, query: 'whether a project created confirmation is visible', condition: 'a confirmation that the project was created appears' };
+  assert.equal(classify(passingRun({ msg: loose, row: ROW })).status, 'NEEDS_REVIEW');
+});
+
+test('create-a-project: two equally good assertions for one outcome (tie) -> NEEDS_REVIEW', () => {
+  assert.equal(classify(passingRun({ msg: MSG, msg2: { ...MSG }, row: ROW })).status, 'NEEDS_REVIEW');
+});
+
+test('create-a-project: a matched assertion that did not pass -> NEEDS_REVIEW, not PASSED', () => {
+  const c = classify(passingRun({ msg: MSG, row: { ...ROW, reasoning: "value: 'false'; equals 'true' -> FAIL" } }));
+  assert.equal(c.status, 'NEEDS_REVIEW');
+  assert.equal(c.outcomeResults[1].status, 'failed');
+});
+
 // ---- Synthetic edge cases ----
 
 const outdated = () => fromFixture(loadFixture('acmedesk-apikey-outdated'), tutorial(OUTDATED_API_KEY_STEPS, API_KEY_OUTCOMES));

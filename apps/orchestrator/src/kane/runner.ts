@@ -50,6 +50,8 @@ export interface RunRecord {
     steps: EvidenceStep[];
     screenshots: { ordinal: number; file: string; url: string | null }[];
     withheldScreenshots: number;
+    /** Result of Kane's documented `kane-cli evidence validate --json` on the pack. */
+    kaneValidation?: { status: 'valid' | 'invalid' | 'not_run'; packStatus: string | null; warnings: number; errors: number };
   };
   classification: Classification | null;
   warnings: string[];
@@ -87,7 +89,9 @@ export function publicRecord(r: RunRecord) {
       steps: r.evidence.steps.map((s) => ({ ordinal: s.ordinal, kind: s.kind, status: s.status, summary: s.summary, url: s.url })),
       screenshots: r.evidence.screenshots.map((s) => ({ ordinal: s.ordinal, file: s.file })),
       withheldScreenshots: r.evidence.withheldScreenshots,
-      reference: r.evidence.found ? `data/runs/${r.runId}/private/evidence.evidence` : null,
+      // No file paths: only a safe reference to the run and validation status.
+      runReference: r.runId,
+      kaneValidation: r.evidence.kaneValidation ?? { status: 'not_run', packStatus: null, warnings: 0, errors: 0 },
     },
     classification: r.classification,
     warnings: r.warnings,
@@ -354,6 +358,37 @@ export class Runner extends EventEmitter {
     rec.classification.matchingNotes = rec.classification.matchingNotes.map((n) => scrub(n));
   }
 
+  /** Run Kane's documented `evidence validate <pack> --json`; only counts are kept. */
+  private kaneValidate(pack: string): Promise<NonNullable<RunRecord['evidence']['kaneValidation']>> {
+    const notRun = { status: 'not_run' as const, packStatus: null, warnings: 0, errors: 0 };
+    if (!this.kaneEntry) return Promise.resolve(notRun);
+    return new Promise((resolve) => {
+      const child = spawn(process.execPath, [this.kaneEntry!, 'evidence', 'validate', pack, '--json'], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, shell: false });
+      let out = '';
+      child.stdout!.setEncoding('utf8');
+      child.stdout!.on('data', (c: string) => {
+        if (out.length < 200_000) out += c;
+      });
+      const timer = setTimeout(() => child.kill(), 60_000);
+      child.on('error', () => resolve(notRun));
+      child.on('close', (code) => {
+        clearTimeout(timer);
+        try {
+          const j = JSON.parse(out.trim().split('\n').pop() ?? '') as { valid?: boolean; status?: string; diagnostics?: { severity?: string }[] };
+          const diags = Array.isArray(j.diagnostics) ? j.diagnostics : [];
+          resolve({
+            status: j.valid === true && code === 0 ? 'valid' : 'invalid',
+            packStatus: typeof j.status === 'string' ? j.status.slice(0, 40) : null,
+            warnings: diags.filter((d) => d.severity === 'warning').length,
+            errors: diags.filter((d) => d.severity === 'error').length,
+          });
+        } catch {
+          resolve(code === 0 ? { ...notRun, status: 'valid' } : notRun);
+        }
+      });
+    });
+  }
+
   private async collectEvidence(rec: RunRecord, work: string, priv: string, reportedPack: string | null) {
     let pack: string | null = null;
     const local = path.join(work, '.testmuai', 'evidence');
@@ -377,6 +412,7 @@ export class Runner extends EventEmitter {
       return null;
     }
     const ev = await readEvidence(target);
+    rec.evidence.kaneValidation = await this.kaneValidate(target);
     rec.evidence.found = true;
     rec.evidence.valid = ev.valid;
     rec.evidence.problems.push(...ev.problems.map(scrub));

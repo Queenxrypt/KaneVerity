@@ -15,6 +15,10 @@ if (cmd === 'balance') {
   process.stdout.write('Available credits: 999.5\n');
   process.exit(0);
 }
+if (cmd === 'evidence' && process.argv[3] === 'validate') {
+  process.stdout.write(JSON.stringify({ valid: true, status: 'finalized', diagnostics: [{ code: 'l1.x', severity: 'warning', location: 'C:\\Users\\SomeUser\\x' }] }) + '\n');
+  process.exit(0);
+}
 if (cmd !== 'run') process.exit(2);
 
 if (process.env.FAKE_KANE_ARGS_OUT) {

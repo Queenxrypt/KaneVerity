@@ -128,6 +128,10 @@ test('security: mutating requests need the custom header, JSON, and an allowed O
   assert.equal((await post('/api/project', { big: 'x'.repeat(70_000) })).status, 413);
   assert.equal(await rawGet('/api/health', 'evil.example:4000'), 421, 'DNS-rebinding Host is rejected');
   assert.equal((await fetch(api + '/api/health')).headers.get('access-control-allow-origin'), null, 'no CORS');
+  // Reads are refused too when a foreign browser Origin is present.
+  assert.equal((await fetch(api + '/api/health', { headers: { Origin: 'http://127.0.0.1:5174' } })).status, 403);
+  assert.equal((await fetch(api + '/api/runs', { headers: { Origin: 'https://evil.example' } })).status, 403);
+  assert.equal((await fetch(api + '/api/health', { headers: { Origin: 'http://127.0.0.1:5173' } })).status, 200, 'the UI origin is allowed');
 });
 
 test('MVP scope: only the allow-listed local demo origins can be connected', async () => {
@@ -141,7 +145,9 @@ test('MVP scope: only the allow-listed local demo origins can be connected', asy
 test('health reports Kane login via exit code only (identity never returned) and the credit budget', async () => {
   const h = await j(await fetch(api + '/api/health'));
   assert.equal(h.kane.loggedIn, true);
-  assert.equal(h.kane.balance, 999);
+  assert.equal('balance' in h.kane, false, 'the TestMu account balance is never sent to the UI');
+  assert.ok(!JSON.stringify(h).includes('999'));
+  assert.deepEqual(Object.keys(h.credits).sort(), ['available', 'limit', 'reserved', 'spent']);
   assert.equal(h.credits.limit, 100);
   assert.deepEqual(findLeaks(h), []);
   assert.ok(!JSON.stringify(h).includes('someone@'));
@@ -179,6 +185,29 @@ test('full flow: connect, discover, run outdated API-key tutorial -> FAILED at s
   assert.ok(!pubText.includes('private-domain'));
   assert.ok(!pubText.includes('US_SECRET'));
   assert.ok(run.warnings.some((w: string) => /unreadable output line/.test(w)));
+
+  // No evidence pack paths anywhere in the UI record: a safe run reference and validation status only.
+  assert.equal(run.evidence.runReference, runIds[0]);
+  assert.equal('reference' in run.evidence, false);
+  assert.ok(!/\.evidence\b|private[\\/]|[\\/]work[\\/]|data[\\/]runs/i.test(JSON.stringify(run)), 'no file paths in the public record');
+  assert.deepEqual(run.evidence.kaneValidation, { status: 'valid', packStatus: 'finalized', warnings: 1, errors: 0 });
+
+  // The runs list and the live event stream use the same redacted record.
+  const list = await j(await fetch(`${api}/api/runs`));
+  assert.ok(list.some((r: { runId: string }) => r.runId === runIds[0]));
+  assert.deepEqual(findLeaks(list), []);
+  assert.ok(!/\.evidence\b|private[\\/]/i.test(JSON.stringify(list)));
+  const ctrl = new AbortController();
+  const sse = await fetch(`${api}/api/runs/${runIds[0]}/events`, { signal: ctrl.signal });
+  assert.equal(sse.headers.get('content-type'), 'text/event-stream');
+  const reader = sse.body!.getReader();
+  const first = new TextDecoder().decode((await reader.read()).value).split('\n\n')[0];
+  ctrl.abort();
+  assert.match(first, /^data: \{/);
+  const event = JSON.parse(first.slice(6).trim());
+  assert.equal(event.runId, runIds[0]);
+  assert.equal(event.classification.status, 'FAILED');
+  assert.deepEqual(findLeaks(event), []);
 
   // Evidence: unexpected archive entry ignored; nothing written outside the run folder.
   assert.ok(run.evidence.problems.some((p: string) => /unexpected entr/.test(p)));

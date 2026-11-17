@@ -15,7 +15,10 @@
     "test:docs": "npm run test --workspace acmedesk-docs",
     "dev:orchestrator": "npm run dev --workspace kaneverity-orchestrator",
     "typecheck:orchestrator": "npm run typecheck --workspace kaneverity-orchestrator",
-    "test:orchestrator": "npm run test --workspace kaneverity-orchestrator"
+    "test:orchestrator": "npm run test --workspace kaneverity-orchestrator",
+    "dev:web": "npm run dev --workspace kaneverity-web",
+    "build:web": "npm run build --workspace kaneverity-web",
+    "typecheck:web": "npm run typecheck --workspace kaneverity-web"
   },
   "engines": {
     "node": ">=18"
