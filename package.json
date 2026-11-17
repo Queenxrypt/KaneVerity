@@ -1,0 +1,17 @@
+{
+  "name": "kaneverity",
+  "private": true,
+  "description": "KaneVerity: documentation you can trust. Verifies tutorials against the live app with Kane CLI.",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev:acmedesk": "npm run dev --workspace acmedesk",
+    "build:acmedesk": "npm run build --workspace acmedesk",
+    "typecheck:acmedesk": "npm run typecheck --workspace acmedesk",
+    "preview:acmedesk": "npm run preview --workspace acmedesk"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

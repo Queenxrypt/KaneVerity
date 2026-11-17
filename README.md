@@ -55,7 +55,7 @@ The orchestrator runs Kane CLI and Claude Code as local processes, so the full w
 | Project brief and agent rules | ✅ `AGENTS.md`, `docs/` |
 | Kane CLI install, login and spike runs | ✅ Verified locally (Kane CLI 0.10.5) |
 | Repository scaffolding | ✅ This commit |
-| AcmeDesk demo app | ⏳ Not started |
+| AcmeDesk demo app | ✅ Built (`apps/acmedesk`) |
 | AcmeDesk Docs | ⏳ Not started |
 | Orchestrator (discovery, Kane runner, Claude correction, retest) | ⏳ Not started |
 | KaneVerity UI | ⏳ Not started |
@@ -79,6 +79,32 @@ cp .env.example .env       # then set KANE_CLI_CHROME_PATH if Chrome isn't auto-
 ```
 
 Run and demo instructions will be added as each part is built.
+
+## AcmeDesk (demo app)
+
+AcmeDesk is a fictional SaaS workspace app and the controlled target that Kane verifies. It has no login, no backend and no destructive actions. All data is fixed seed data held in memory, so every fresh browser session starts from the same state.
+
+```bash
+npm install
+npm run dev:acmedesk        # http://127.0.0.1:5174
+npm run typecheck:acmedesk
+npm run build:acmedesk
+```
+
+| Section | URL | Verifiable action → confirmation |
+|---|---|---|
+| Dashboard | `/` | — |
+| Projects | `/projects` | New project → Create project → `Project "<name>" created.` |
+| Team Members | `/team` | Invite member → Send invite → `Invitation sent to <email> as <role>.` (simulated, no email sent) |
+| Workspace Settings | `/workspace-settings` | Save changes → `Workspace settings saved.` |
+| Developer Settings | `/developer` | — |
+| API Keys | `/developer/api-keys` | Generate Key → `API key generated successfully.` |
+
+The real API-key path is **Dashboard → Developer Settings → API Keys → Generate Key**. There is deliberately no menu item labelled just "Settings" or "API", so the outdated tutorial path fails.
+
+Generated keys look like `demo_fake_key_0002`. They are fake placeholder values, not credentials, and cannot be used anywhere.
+
+Confirmations appear in a persistent `role="status"` region (with a `data-testid`) and do not auto-dismiss, so Kane has time to observe them. Unknown URLs, such as old documented paths, show a "Page not found" page.
 
 ## Security notes
 
