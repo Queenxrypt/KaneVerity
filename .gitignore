@@ -1,0 +1,58 @@
+# --- Secrets and local configuration ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- Kane CLI local state and generated evidence ---
+# Kane writes tests, run output and sealed evidence packs here.
+.testmuai/
+# Kane Assurance context store (append-only; never commit or merge).
+.context/
+*.evidence
+output-*/
+Result.md
+
+# --- KaneVerity runtime data (runs, findings, corrections) ---
+# Anchored to the repo root so source folders with these names are not hidden.
+/data/
+/evidence/
+
+# --- Dependencies ---
+node_modules/
+.pnpm-store/
+
+# --- Build output and caches ---
+dist/
+build/
+.vite/
+coverage/
+*.tsbuildinfo
+.cache/
+
+# --- Logs and temporary files ---
+*.log
+npm-debug.log*
+/logs/
+tmp/
+temp/
+scratch/
+scratchpad/
+*.tmp
+*.bak
+*.orig
+
+# --- Editor and OS files ---
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Deployment tooling ---
+.vercel/
+
+# --- Claude Code local (per-user) settings ---
+.claude/settings.local.json
