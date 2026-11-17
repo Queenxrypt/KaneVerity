@@ -1,0 +1,322 @@
+{
+  "name": "acmedesk-apikey-asserted",
+  "note": "Sanitized from a real Kane CLI 0.10.5 run. Allow-listed fields only; account, path and link data removed.",
+  "exitCode": 0,
+  "appOrigin": "http://127.0.0.1:5174",
+  "cliVersion": "0.10.5",
+  "progress": [
+    {
+      "step": 2,
+      "status": "running",
+      "remark": "Step 1"
+    },
+    {
+      "step": 2,
+      "status": "done",
+      "remark": "navigate: Navigate to http://127.0.0.1:5174/"
+    },
+    {
+      "step": 3,
+      "status": "running",
+      "remark": "Step 2"
+    },
+    {
+      "step": 3,
+      "status": "done",
+      "remark": "analyze: the API keys count on the Dashboard is 1"
+    },
+    {
+      "step": 4,
+      "status": "running",
+      "remark": "Step 3"
+    },
+    {
+      "step": 4,
+      "status": "done",
+      "remark": "assert: the API keys count on the Dashboard is 1"
+    },
+    {
+      "step": 5,
+      "status": "running",
+      "remark": "Step 4"
+    },
+    {
+      "step": 5,
+      "status": "done",
+      "remark": "click: Clicking Developer Settings in the main navigation"
+    },
+    {
+      "step": 6,
+      "status": "running",
+      "remark": "Step 5"
+    },
+    {
+      "step": 6,
+      "status": "done",
+      "remark": "click: Clicking API Keys in Developer Settings"
+    },
+    {
+      "step": 7,
+      "status": "running",
+      "remark": "Step 6"
+    },
+    {
+      "step": 7,
+      "status": "done",
+      "remark": "wait: PRIMARY: wait for the API Keys page to load"
+    },
+    {
+      "step": 8,
+      "status": "running",
+      "remark": "Step 7"
+    },
+    {
+      "step": 8,
+      "status": "done",
+      "remark": "analyze: the text '1 key' is shown below the keys table"
+    },
+    {
+      "step": 9,
+      "status": "running",
+      "remark": "Step 8"
+    },
+    {
+      "step": 9,
+      "status": "done",
+      "remark": "assert: the text '1 key' is shown below the keys table"
+    },
+    {
+      "step": 10,
+      "status": "running",
+      "remark": "Step 9"
+    },
+    {
+      "step": 10,
+      "status": "done",
+      "remark": "click: Clicking Generate Key"
+    },
+    {
+      "step": 11,
+      "status": "running",
+      "remark": "Step 10"
+    },
+    {
+      "step": 11,
+      "status": "done",
+      "remark": "analyze: the text '2 keys' is shown below the keys table"
+    },
+    {
+      "step": 12,
+      "status": "running",
+      "remark": "Step 11"
+    },
+    {
+      "step": 12,
+      "status": "done",
+      "remark": "assert: the message 'API key generated successfully' is visible"
+    },
+    {
+      "step": 13,
+      "status": "running",
+      "remark": "Step 12"
+    },
+    {
+      "step": 13,
+      "status": "done",
+      "remark": "assert: the keys table contains a row with the key 'demo_fake_key_0002'"
+    },
+    {
+      "step": 14,
+      "status": "running",
+      "remark": "Step 13"
+    },
+    {
+      "step": 14,
+      "status": "done",
+      "remark": "assert: the text '2 keys' is shown below the keys table"
+    }
+  ],
+  "runEnd": {
+    "type": "run_end",
+    "status": "passed",
+    "summary": "You asked to generate an API key by opening Developer Settings, selecting API Keys, and choosing Generate Key.\nThe Dashboard showed 1 API key before navigation.\nThe API Keys page initially showed “1 key” below the table.\nA new API key was generated successfully.\nThe table now includes demo_fake_key_0002, and the count below it shows “2 keys.”",
+    "one_liner": "generated an API key on the Developer API Keys page",
+    "reason": "Objective completed",
+    "reason_code": "success.complete",
+    "result_code": 100,
+    "duration": 109.1,
+    "credits_consumed": 32.6716475,
+    "final_state": {
+      "url": "http://127.0.0.1:5174/developer/api-keys",
+      "api_key_generated_successfully_message": "true",
+      "generated_key": "demo_fake_key_0002",
+      "api_key_count": "2 keys"
+    },
+    "context": {
+      "memory": {
+        "dashboard_api_keys_count_check": {
+          "query": "the API keys count in the Workspace summary on the Dashboard",
+          "condition": "the API keys count on the Dashboard is 1",
+          "human_description": "Reading the API keys count from the Dashboard workspace summary",
+          "extracted_value": "1\nAPI keys",
+          "expected_value": "1",
+          "operator": "equals",
+          "reasoning": "value: '1\\nAPI keys' -> '1' after ['extract_number']; equals '1' -> PASS",
+          "analyzer_type": "textual_visual",
+          "step": 2
+        },
+        "one_key_text_shown": {
+          "query": "whether the text '1 key' is visible below the API keys table",
+          "condition": "the text '1 key' is shown below the keys table",
+          "human_description": "Checking whether the '1 key' text is shown below the keys table",
+          "extracted_value": "true",
+          "expected_value": "true",
+          "operator": "equals",
+          "reasoning": "value: 'true' -> 'true'; equals 'true' -> PASS",
+          "analyzer_type": "visual",
+          "step": 7
+        },
+        "api_key_generated_successfully_message": {
+          "query": "whether the success message 'API key generated successfully' is present in the status notification",
+          "condition": "the message 'API key generated successfully' is visible",
+          "human_description": "Checking whether the API key success message is present",
+          "extracted_value": "true",
+          "expected_value": "true",
+          "operator": "equals",
+          "reasoning": "value: 'true' -> 'true'; equals 'true' -> PASS",
+          "analyzer_type": "textual_visual",
+          "step": 10
+        },
+        "demo_fake_key_0002_row": {
+          "query": "whether a row with the key 'demo_fake_key_0002' is present in the API keys table",
+          "condition": "the keys table contains a row with the key 'demo_fake_key_0002'",
+          "human_description": "Checking whether the requested API key row is present",
+          "extracted_value": "true",
+          "expected_value": "true",
+          "operator": "equals",
+          "reasoning": "value: 'true' -> 'true'; equals 'true' -> PASS",
+          "analyzer_type": "textual_visual",
+          "step": 10
+        },
+        "two_keys_text_shown": {
+          "query": "whether the text '2 keys' is present below the API keys table",
+          "condition": "the text '2 keys' is shown below the keys table",
+          "human_description": "Checking whether the keys count text is shown below the table",
+          "extracted_value": "true",
+          "expected_value": "true",
+          "operator": "equals",
+          "reasoning": "value: 'true' -> 'true'; equals 'true' -> PASS",
+          "analyzer_type": "textual_visual",
+          "step": 10
+        }
+      }
+    }
+  },
+  "evidenceSteps": [
+    {
+      "ordinal": 1,
+      "id": "0-1",
+      "kind": "navigate",
+      "status": "passed",
+      "summary": "navigate: Navigate to http://127.0.0.1:5174/",
+      "url": "http://127.0.0.1:5174/"
+    },
+    {
+      "ordinal": 2,
+      "id": "0-2",
+      "kind": "analyze",
+      "status": "passed",
+      "summary": "analyze: the API keys count on the Dashboard is 1",
+      "url": "http://127.0.0.1:5174/"
+    },
+    {
+      "ordinal": 3,
+      "id": "0-3",
+      "kind": "assert",
+      "status": "passed",
+      "summary": "assert: the API keys count on the Dashboard is 1",
+      "url": "http://127.0.0.1:5174/"
+    },
+    {
+      "ordinal": 4,
+      "id": "0-4",
+      "kind": "click",
+      "status": "passed",
+      "summary": "click: Clicking Developer Settings in the main navigation",
+      "url": "http://127.0.0.1:5174/"
+    },
+    {
+      "ordinal": 5,
+      "id": "0-5",
+      "kind": "click",
+      "status": "passed",
+      "summary": "click: Clicking API Keys in Developer Settings",
+      "url": "http://127.0.0.1:5174/developer"
+    },
+    {
+      "ordinal": 6,
+      "id": "0-6",
+      "kind": "wait",
+      "status": "passed",
+      "summary": "wait: PRIMARY: wait for the API Keys page to load",
+      "url": "http://127.0.0.1:5174/developer/api-keys"
+    },
+    {
+      "ordinal": 7,
+      "id": "0-7",
+      "kind": "analyze",
+      "status": "passed",
+      "summary": "analyze: the text '1 key' is shown below the keys table",
+      "url": "http://127.0.0.1:5174/developer/api-keys"
+    },
+    {
+      "ordinal": 8,
+      "id": "0-8",
+      "kind": "assert",
+      "status": "passed",
+      "summary": "assert: the text '1 key' is shown below the keys table",
+      "url": "http://127.0.0.1:5174/developer/api-keys"
+    },
+    {
+      "ordinal": 9,
+      "id": "0-9",
+      "kind": "click",
+      "status": "passed",
+      "summary": "click: Clicking Generate Key",
+      "url": "http://127.0.0.1:5174/developer/api-keys"
+    },
+    {
+      "ordinal": 10,
+      "id": "0-10",
+      "kind": "analyze",
+      "status": "passed",
+      "summary": "analyze: the text '2 keys' is shown below the keys table",
+      "url": "http://127.0.0.1:5174/developer/api-keys"
+    },
+    {
+      "ordinal": 11,
+      "id": "0-11",
+      "kind": "assert",
+      "status": "passed",
+      "summary": "assert: the message 'API key generated successfully' is visible",
+      "url": "http://127.0.0.1:5174/developer/api-keys"
+    },
+    {
+      "ordinal": 12,
+      "id": "0-12",
+      "kind": "assert",
+      "status": "passed",
+      "summary": "assert: the keys table contains a row with the key 'demo_fake_key_0002'",
+      "url": "http://127.0.0.1:5174/developer/api-keys"
+    },
+    {
+      "ordinal": 13,
+      "id": "0-13",
+      "kind": "assert",
+      "status": "passed",
+      "summary": "assert: the text '2 keys' is shown below the keys table",
+      "url": "http://127.0.0.1:5174/developer/api-keys"
+    }
+  ],
+  "failureMessage": null
+}

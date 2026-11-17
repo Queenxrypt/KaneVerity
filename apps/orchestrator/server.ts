@@ -1,0 +1,305 @@
+// KaneVerity orchestrator API (local only).
+//
+// Security:
+//  - listens on 127.0.0.1 only; Host header must be 127.0.0.1:4000/localhost:4000
+//    (DNS-rebinding protection)
+//  - every mutating request needs `X-KaneVerity: 1`, a JSON body, and, if the
+//    browser sends an Origin, one of the KaneVerity UI origins. No CORS headers
+//    are ever sent, so other websites cannot call this API.
+//  - MVP: live verification only against the allow-listed local demo origins.
+
+import { spawn } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { config } from './src/config.ts';
+import { discover } from './src/discovery/crawl.ts';
+import { Runner, publicRecord } from './src/kane/runner.ts';
+import { dataPath, readJson, RUN_ID_PATTERN, runDir, writeJson } from './src/store.ts';
+import type { Discovery, Project } from './src/types.ts';
+import { isAllowedOrigin, originOf, UrlError } from './src/urls.ts';
+
+const MAX_BODY = 64 * 1024;
+const HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'no-referrer',
+  'Cross-Origin-Resource-Policy': 'same-origin',
+  'Cache-Control': 'no-store',
+};
+
+class HttpError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+function json(res: ServerResponse, status: number, body: unknown) {
+  res.writeHead(status, { ...HEADERS, 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(JSON.stringify(body));
+}
+
+async function readBody(req: IncomingMessage): Promise<unknown> {
+  const type = req.headers['content-type'] ?? '';
+  if (!/^application\/json\b/i.test(type)) throw new HttpError(415, 'Content-Type must be application/json.');
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += (chunk as Buffer).length;
+    if (size > MAX_BODY) throw new HttpError(413, 'Request body too large.');
+    chunks.push(chunk as Buffer);
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+  } catch {
+    throw new HttpError(400, 'Invalid JSON.');
+  }
+}
+
+/** Run `node <kane-cli> <cmd>` and return exit code + stdout (stdout is never sent to the UI raw). */
+function kaneCommand(entry: string, cmd: string): Promise<{ code: number | null; out: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [entry, cmd], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, shell: false });
+    let out = '';
+    child.stdout!.setEncoding('utf8');
+    child.stdout!.on('data', (c: string) => {
+      if (out.length < 20_000) out += c;
+    });
+    const timer = setTimeout(() => child.kill(), 60_000);
+    child.on('error', () => resolve({ code: null, out: '' }));
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ code, out });
+    });
+  });
+}
+
+let kaneStatusCache: { at: number; value: { installed: boolean; loggedIn: boolean; balance: number | null } } | null = null;
+async function kaneStatus() {
+  if (kaneStatusCache && Date.now() - kaneStatusCache.at < 60_000) return kaneStatusCache.value;
+  const entry = config.kane.entry;
+  let value = { installed: !!entry, loggedIn: false, balance: null as number | null };
+  if (entry) {
+    const who = await kaneCommand(entry, 'whoami'); // only the exit code is used; identity is never stored or shown
+    const bal = await kaneCommand(entry, 'balance');
+    const m = /Available credits:\s*([0-9]+(?:\.[0-9]+)?)/.exec(bal.out);
+    value = { installed: true, loggedIn: who.code === 0, balance: m ? Math.floor(Number(m[1])) : null };
+  }
+  kaneStatusCache = { at: Date.now(), value };
+  return value;
+}
+
+async function reachable(url: string): Promise<boolean> {
+  try {
+    const res = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(4000) });
+    return res.status >= 200 && res.status < 400;
+  } catch {
+    return false;
+  }
+}
+
+function checkUrlPair(docsUrl: unknown, appUrl: unknown): Project {
+  if (typeof docsUrl !== 'string' || typeof appUrl !== 'string' || !docsUrl.trim() || !appUrl.trim()) {
+    throw new HttpError(400, 'Both the documentation URL and the application URL are required.');
+  }
+  let docsOrigin: string;
+  let appOrigin: string;
+  try {
+    docsOrigin = originOf(docsUrl);
+    appOrigin = originOf(appUrl);
+  } catch (err) {
+    throw new HttpError(400, (err as UrlError).message);
+  }
+  if (!isAllowedOrigin(docsOrigin, config.allowedDocsOrigins) || !isAllowedOrigin(appOrigin, config.allowedAppOrigins)) {
+    throw new HttpError(
+      400,
+      `This MVP only runs live verification against the controlled local demo (docs ${config.allowedDocsOrigins.join(', ')}, app ${config.allowedAppOrigins.join(', ')}). Arbitrary third-party documentation is not supported for live execution yet.`,
+    );
+  }
+  if (docsOrigin === appOrigin) throw new HttpError(400, 'The documentation and the application must be on different origins.');
+  return { docsUrl: docsUrl.trim(), docsOrigin, appUrl: appUrl.trim(), appOrigin, savedAt: new Date().toISOString() };
+}
+
+export function createOrchestrator(runner = new Runner()): Server {
+  return createServer(async (req, res) => {
+    try {
+      const host = (req.headers.host ?? '').toLowerCase();
+      if (!config.allowedHosts.includes(host) && !host.startsWith('127.0.0.1:')) throw new HttpError(421, 'Unexpected Host header.');
+      const url = new URL(req.url ?? '/', 'http://orchestrator.invalid');
+      const method = req.method ?? 'GET';
+
+      if (method !== 'GET' && method !== 'HEAD') {
+        if (req.headers['x-kaneverity'] !== '1') throw new HttpError(403, 'Missing X-KaneVerity header.');
+        const origin = req.headers.origin;
+        if (origin && !config.uiOrigins.includes(origin)) throw new HttpError(403, 'Origin not allowed.');
+      }
+
+      const p = url.pathname;
+
+      if (method === 'GET' && p === '/api/health') {
+        const project = await readJson<Project>(dataPath('project.json'));
+        const [docsOk, appOk, kane, budget] = await Promise.all([
+          project ? reachable(project.docsUrl) : Promise.resolve(false),
+          project ? reachable(project.appUrl) : Promise.resolve(false),
+          kaneStatus(),
+          runner.budget(),
+        ]);
+        return json(res, 200, {
+          project,
+          docsReachable: docsOk,
+          appReachable: appOk,
+          kane,
+          credits: budget,
+          liveVerificationScope: { docs: config.allowedDocsOrigins, app: config.allowedAppOrigins, note: 'Live verification is limited to the controlled local AcmeDesk demo.' },
+        });
+      }
+
+      if (method === 'POST' && p === '/api/project') {
+        const body = (await readBody(req)) as Record<string, unknown>;
+        const project = checkUrlPair(body.docsUrl, body.appUrl);
+        await writeJson(dataPath('project.json'), project);
+        return json(res, 200, { project });
+      }
+
+      if (method === 'POST' && p === '/api/discover') {
+        await readBody(req);
+        const project = await readJson<Project>(dataPath('project.json'));
+        if (!project) throw new HttpError(409, 'Connect a project first.');
+        const result = await discover(project.docsUrl, project.appOrigin);
+        await writeJson(dataPath('discovery.json'), result);
+        return json(res, 200, result);
+      }
+
+      if (method === 'GET' && p === '/api/discovery') {
+        return json(res, 200, (await readJson<Discovery>(dataPath('discovery.json'))) ?? null);
+      }
+
+      if (method === 'POST' && p === '/api/runs') {
+        const body = (await readBody(req)) as Record<string, unknown>;
+        const ids = body.tutorialIds;
+        if (!Array.isArray(ids) || ids.length === 0 || ids.length > 10 || !ids.every((x) => typeof x === 'string')) {
+          throw new HttpError(400, 'tutorialIds must be a list of 1 to 10 tutorial ids.');
+        }
+        const project = await readJson<Project>(dataPath('project.json'));
+        const discovery = await readJson<Discovery>(dataPath('discovery.json'));
+        if (!project || !discovery) throw new HttpError(409, 'Connect a project and discover tutorials first.');
+        if (discovery.appOrigin !== project.appOrigin) throw new HttpError(409, 'Discovery is out of date for this project. Discover again.');
+        const tutorials = (ids as string[]).map((id) => discovery.tutorials.find((t) => t.id === id));
+        if (tutorials.some((t) => !t)) throw new HttpError(404, 'Unknown tutorial id.');
+        const notRunnable = tutorials.find((t) => t!.notRunnable);
+        if (notRunnable) throw new HttpError(422, `"${notRunnable.title}" cannot be verified: ${notRunnable.notRunnable}`);
+        const budget = await runner.budget();
+        const needed = tutorials.length * config.kane.estimatedCreditsPerRun;
+        if (needed > budget.available) {
+          throw new HttpError(409, `Credit limit: ${tutorials.length} run(s) may need up to ${needed} credits, but only ${budget.available} of the ${budget.limit}-credit limit remain.`);
+        }
+        const runIds: string[] = [];
+        for (const t of tutorials) {
+          try {
+            runIds.push(await runner.enqueue(t!, project));
+          } catch (err) {
+            throw new HttpError(422, (err as Error).message);
+          }
+        }
+        return json(res, 202, { runIds, estimatedCredits: needed });
+      }
+
+      if (method === 'GET' && p === '/api/runs') {
+        const index = (await readJson<string[]>(dataPath('runs-index.json'))) ?? [];
+        const list = [];
+        for (const id of index.slice(-50).reverse()) {
+          const pub = await readJson<Record<string, unknown>>(runDir(id, 'public.json'));
+          if (pub) list.push(pub);
+        }
+        return json(res, 200, list);
+      }
+
+      const runMatch = /^\/api\/runs\/([^/]+)(?:\/(events|cancel|screens\/([^/]+)))?$/.exec(p);
+      if (runMatch) {
+        const runId = runMatch[1];
+        if (!RUN_ID_PATTERN.test(runId)) throw new HttpError(404, 'Run not found.');
+        const sub = runMatch[2];
+
+        if (method === 'GET' && !sub) {
+          const live = runner.get(runId);
+          const pub = live ? publicRecord(live) : await readJson(runDir(runId, 'public.json'));
+          if (!pub) throw new HttpError(404, 'Run not found.');
+          return json(res, 200, pub);
+        }
+
+        if (method === 'POST' && sub === 'cancel') {
+          await readBody(req);
+          return json(res, runner.cancel(runId) ? 202 : 409, { cancelled: true });
+        }
+
+        if (method === 'GET' && sub === 'events') {
+          if (!runner.get(runId) && !(await readJson(runDir(runId, 'public.json')))) throw new HttpError(404, 'Run not found.');
+          res.writeHead(200, { ...HEADERS, 'Content-Type': 'text/event-stream', Connection: 'keep-alive' });
+          const send = () => {
+            const live = runner.get(runId);
+            if (live) res.write(`data: ${JSON.stringify(publicRecord(live))}\n\n`);
+          };
+          send();
+          const onEvent = (id: string) => id === runId && send();
+          runner.on('progress', onEvent);
+          runner.on('update', onEvent);
+          req.on('close', () => {
+            runner.off('progress', onEvent);
+            runner.off('update', onEvent);
+          });
+          return;
+        }
+
+        if (method === 'GET' && sub?.startsWith('screens/')) {
+          const file = runMatch[3];
+          if (!/^[0-9]{1,4}\.jpg$/.test(file)) throw new HttpError(404, 'Not found.');
+          const dir = runDir(runId, 'public', 'screens');
+          const full = path.resolve(dir, file);
+          if (!full.startsWith(path.resolve(dir) + path.sep)) throw new HttpError(404, 'Not found.');
+          let data: Buffer;
+          try {
+            data = await readFile(full);
+          } catch {
+            throw new HttpError(404, 'Not found.');
+          }
+          res.writeHead(200, { ...HEADERS, 'Content-Type': 'image/jpeg' });
+          return res.end(data);
+        }
+      }
+
+      throw new HttpError(404, 'Not found.');
+    } catch (err) {
+      if (err instanceof HttpError) return json(res, err.status, { error: err.message });
+      console.error('[orchestrator] request failed:', (err as Error).message);
+      return json(res, 500, { error: 'Internal error.' });
+    }
+  });
+}
+
+/** Keep an index of run ids so /api/runs can list them. */
+export function trackRuns(runner: Runner): void {
+  runner.on('update', async (runId: string) => {
+    const index = (await readJson<string[]>(dataPath('runs-index.json'))) ?? [];
+    if (!index.includes(runId)) {
+      index.push(runId);
+      await writeJson(dataPath('runs-index.json'), index);
+    }
+  });
+}
+
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+  const runner = new Runner();
+  trackRuns(runner);
+  const server = createOrchestrator(runner);
+  server.on('error', (err: NodeJS.ErrnoException) => {
+    console.error(err.code === 'EADDRINUSE' ? `[orchestrator] Port ${config.port} is already in use.` : `[orchestrator] ${err.message}`);
+    process.exit(1);
+  });
+  server.listen(config.port, config.host, () => {
+    console.log(`[orchestrator] KaneVerity orchestrator on http://${config.host}:${config.port}/`);
+    console.log(`[orchestrator] Kane CLI: ${config.kane.entry ? 'found' : 'NOT FOUND'}; credit limit ${config.credits.hardLimit}`);
+  });
+}

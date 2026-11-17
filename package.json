@@ -12,7 +12,10 @@
     "preview:acmedesk": "npm run preview --workspace acmedesk",
     "dev:docs": "npm run dev --workspace acmedesk-docs",
     "typecheck:docs": "npm run typecheck --workspace acmedesk-docs",
-    "test:docs": "npm run test --workspace acmedesk-docs"
+    "test:docs": "npm run test --workspace acmedesk-docs",
+    "dev:orchestrator": "npm run dev --workspace kaneverity-orchestrator",
+    "typecheck:orchestrator": "npm run typecheck --workspace kaneverity-orchestrator",
+    "test:orchestrator": "npm run test --workspace kaneverity-orchestrator"
   },
   "engines": {
     "node": ">=18"

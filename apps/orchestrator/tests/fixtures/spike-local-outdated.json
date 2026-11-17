@@ -1,0 +1,63 @@
+{
+  "name": "spike-local-outdated",
+  "note": "Sanitized from a real Kane CLI 0.10.5 run. Allow-listed fields only; account, path and link data removed.",
+  "exitCode": 1,
+  "appOrigin": "http://localhost:8765",
+  "cliVersion": "0.10.5",
+  "progress": [
+    {
+      "step": 2,
+      "status": "running",
+      "remark": "Step 1"
+    },
+    {
+      "step": 2,
+      "status": "done",
+      "remark": "navigate: Navigate to http://localhost:8765/"
+    },
+    {
+      "step": 3,
+      "status": "running",
+      "remark": "Step 2"
+    },
+    {
+      "step": 3,
+      "status": "failed",
+      "remark": "wait: Waiting Settings button on the Dashboard"
+    }
+  ],
+  "runEnd": {
+    "type": "run_end",
+    "status": "failed",
+    "summary": "The documented test step expects a button called “Settings,” but this Dashboard shows “Developer Settings” and “Projects” instead. The test's exact label no longer matches the available page controls.\nUpdate the test documentation and locator to the current approved label and route, or restore an exact “Settings” control if that label is the required product contract.",
+    "one_liner": "The run stopped because the required Dashboard element named “Settings” was not present.",
+    "reason": "The Dashboard contains only “Developer Settings” and “Projects”; no exact “Settings” element exists.",
+    "reason_code": "assertion_error.step_not_achievable",
+    "result_code": 750,
+    "duration": 53.2,
+    "credits_consumed": 11.17491,
+    "final_state": {},
+    "context": {
+      "memory": {}
+    }
+  },
+  "evidenceSteps": [
+    {
+      "ordinal": 1,
+      "id": "0-1",
+      "kind": "navigate",
+      "status": "passed",
+      "summary": "navigate: Navigate to http://localhost:8765/",
+      "url": "http://localhost:8765/"
+    },
+    {
+      "ordinal": 2,
+      "id": "0-2",
+      "kind": "",
+      "status": "failed",
+      "summary": "wait: Waiting Settings button on the Dashboard",
+      "url": "http://localhost:8765/"
+    }
+  ],
+  "failureMessage": "The Dashboard contains only “Developer Settings” and “Projects”; no exact “Settings” element exists."
+}

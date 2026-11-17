@@ -1,0 +1,119 @@
+{
+  "name": "acmedesk-apikey-no-asserts",
+  "note": "Sanitized from a real Kane CLI 0.10.5 run. Allow-listed fields only; account, path and link data removed.",
+  "exitCode": 0,
+  "appOrigin": "http://127.0.0.1:5174",
+  "cliVersion": "0.10.5",
+  "progress": [
+    {
+      "step": 2,
+      "status": "running",
+      "remark": "Step 1"
+    },
+    {
+      "step": 2,
+      "status": "done",
+      "remark": "navigate: Navigate to http://127.0.0.1:5174/"
+    },
+    {
+      "step": 3,
+      "status": "running",
+      "remark": "Step 2"
+    },
+    {
+      "step": 3,
+      "status": "done",
+      "remark": "click: Clicking Developer Settings in the left navigation sidebar"
+    },
+    {
+      "step": 4,
+      "status": "running",
+      "remark": "Step 3"
+    },
+    {
+      "step": 4,
+      "status": "done",
+      "remark": "click: Clicking API Keys link"
+    },
+    {
+      "step": 5,
+      "status": "running",
+      "remark": "Step 4"
+    },
+    {
+      "step": 5,
+      "status": "done",
+      "remark": "click: Clicking Generate Key button in API Keys"
+    },
+    {
+      "step": 6,
+      "status": "running",
+      "remark": "Step 5"
+    },
+    {
+      "step": 6,
+      "status": "done",
+      "remark": "wait: Waiting after Generate Key confirmation"
+    }
+  ],
+  "runEnd": {
+    "type": "run_end",
+    "status": "passed",
+    "summary": "The requested path was followed from the Dashboard: Developer Settings, then API Keys, then Generate Key.\nThe run completed on the API Keys page.",
+    "one_liner": "generated an API key on the Dashboard site",
+    "reason": "Objective completed",
+    "reason_code": "success.complete",
+    "result_code": 100,
+    "duration": 65.3,
+    "credits_consumed": 12.640297499999999,
+    "final_state": {
+      "url": "http://127.0.0.1:5174/developer/api-keys"
+    },
+    "context": {
+      "memory": {}
+    }
+  },
+  "evidenceSteps": [
+    {
+      "ordinal": 1,
+      "id": "0-1",
+      "kind": "navigate",
+      "status": "passed",
+      "summary": "navigate: Navigate to http://127.0.0.1:5174/",
+      "url": "http://127.0.0.1:5174/"
+    },
+    {
+      "ordinal": 2,
+      "id": "0-2",
+      "kind": "click",
+      "status": "passed",
+      "summary": "click: Clicking Developer Settings in the left navigation sidebar",
+      "url": "http://127.0.0.1:5174/"
+    },
+    {
+      "ordinal": 3,
+      "id": "0-3",
+      "kind": "click",
+      "status": "passed",
+      "summary": "click: Clicking API Keys link",
+      "url": "http://127.0.0.1:5174/developer"
+    },
+    {
+      "ordinal": 4,
+      "id": "0-4",
+      "kind": "click",
+      "status": "passed",
+      "summary": "click: Clicking Generate Key button in API Keys",
+      "url": "http://127.0.0.1:5174/developer/api-keys"
+    },
+    {
+      "ordinal": 5,
+      "id": "0-5",
+      "kind": "",
+      "status": "passed",
+      "summary": "wait: Waiting after Generate Key confirmation",
+      "url": "http://127.0.0.1:5174/developer/api-keys"
+    }
+  ],
+  "failureMessage": null
+}

@@ -1,0 +1,96 @@
+{
+  "name": "spike-example-pass",
+  "note": "Sanitized from a real Kane CLI 0.10.5 run. Allow-listed fields only; account, path and link data removed.",
+  "exitCode": 0,
+  "appOrigin": "https://example.com",
+  "cliVersion": "0.10.5",
+  "progress": [
+    {
+      "step": 2,
+      "status": "running",
+      "remark": "Step 1"
+    },
+    {
+      "step": 2,
+      "status": "done",
+      "remark": "navigate: Navigate to https://example.com"
+    },
+    {
+      "step": 3,
+      "status": "running",
+      "remark": "Step 2"
+    },
+    {
+      "step": 3,
+      "status": "done",
+      "remark": "analyze: the page title contains 'Example'"
+    },
+    {
+      "step": 4,
+      "status": "running",
+      "remark": "Step 3"
+    },
+    {
+      "step": 4,
+      "status": "done",
+      "remark": "assert: the page title contains 'Example'"
+    }
+  ],
+  "runEnd": {
+    "type": "run_end",
+    "status": "passed",
+    "summary": "Opened example.com to confirm the requested page loaded.\nVerified that the page title is “Example Domain,” which contains “Example.”\nThe check completed successfully.",
+    "one_liner": "verified the Example page on example.com",
+    "reason": "Objective completed",
+    "reason_code": "success.complete",
+    "result_code": 100,
+    "duration": 36.5,
+    "credits_consumed": 11.429224999999999,
+    "final_state": {
+      "url": "https://example.com/",
+      "page_title": "Example Domain"
+    },
+    "context": {
+      "memory": {
+        "page_title_contains_example": {
+          "query": "the page title contains 'Example'",
+          "condition": "the page title contains 'Example'",
+          "human_description": "Extracting the current page title",
+          "extracted_value": "Example Domain",
+          "expected_value": "Example",
+          "operator": "contains",
+          "reasoning": "value: 'Example Domain' -> 'Example Domain'; contains 'Example' -> PASS",
+          "analyzer_type": "title",
+          "step": 2
+        }
+      }
+    }
+  },
+  "evidenceSteps": [
+    {
+      "ordinal": 1,
+      "id": "0-1",
+      "kind": "navigate",
+      "status": "passed",
+      "summary": "navigate: Navigate to https://example.com",
+      "url": "https://example.com/"
+    },
+    {
+      "ordinal": 2,
+      "id": "0-2",
+      "kind": "analyze",
+      "status": "passed",
+      "summary": "analyze: the page title contains 'Example'",
+      "url": "https://example.com/"
+    },
+    {
+      "ordinal": 3,
+      "id": "0-3",
+      "kind": "assert",
+      "status": "passed",
+      "summary": "assert: the page title contains 'Example'",
+      "url": "https://example.com/"
+    }
+  ],
+  "failureMessage": null
+}

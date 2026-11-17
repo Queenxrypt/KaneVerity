@@ -1,0 +1,150 @@
+{
+  "name": "spike-local-correct",
+  "note": "Sanitized from a real Kane CLI 0.10.5 run. Allow-listed fields only; account, path and link data removed.",
+  "exitCode": 0,
+  "appOrigin": "http://localhost:8765",
+  "cliVersion": "0.10.5",
+  "progress": [
+    {
+      "step": 2,
+      "status": "running",
+      "remark": "Step 1"
+    },
+    {
+      "step": 2,
+      "status": "done",
+      "remark": "navigate: Navigate to http://localhost:8765/"
+    },
+    {
+      "step": 3,
+      "status": "running",
+      "remark": "Step 2"
+    },
+    {
+      "step": 3,
+      "status": "done",
+      "remark": "click: Clicking Developer Settings"
+    },
+    {
+      "step": 4,
+      "status": "running",
+      "remark": "Step 3"
+    },
+    {
+      "step": 4,
+      "status": "done",
+      "remark": "click: Clicking API Keys"
+    },
+    {
+      "step": 5,
+      "status": "running",
+      "remark": "Step 4"
+    },
+    {
+      "step": 5,
+      "status": "done",
+      "remark": "click: Clicking Generate Key"
+    },
+    {
+      "step": 6,
+      "status": "running",
+      "remark": "Step 5"
+    },
+    {
+      "step": 6,
+      "status": "done",
+      "remark": "analyze: ANALYZE(textual_visual, 'a message confirming that an API key was generated is v"
+    },
+    {
+      "step": 7,
+      "status": "running",
+      "remark": "Step 6"
+    },
+    {
+      "step": 7,
+      "status": "done",
+      "remark": "assert: a message confirming that an API key was generated is visible"
+    }
+  ],
+  "runEnd": {
+    "type": "run_end",
+    "status": "passed",
+    "summary": "The requested navigation was completed by opening Developer Settings from the Dashboard, then opening API Keys.\nGenerate Key was selected on the API Keys page.\nA confirmation message showed that an API key was generated successfully.",
+    "one_liner": "generated an API key on the Dashboard site",
+    "reason": "Objective completed",
+    "reason_code": "success.complete",
+    "result_code": 100,
+    "duration": 90.3,
+    "credits_consumed": 18.436414999999997,
+    "final_state": {
+      "url": "http://localhost:8765/",
+      "api_key_generated_confirmation_visible": "true"
+    },
+    "context": {
+      "memory": {
+        "api_key_generated_confirmation_visible": {
+          "query": "whether the API key generated confirmation message is present in the API Keys status area",
+          "condition": "a message confirming that an API key was generated is visible",
+          "human_description": "Checking whether the API key generated confirmation is present",
+          "extracted_value": "true",
+          "expected_value": "true",
+          "operator": "equals",
+          "reasoning": "value: 'true' -> 'true'; equals 'true' -> PASS",
+          "analyzer_type": "textual_visual",
+          "step": 5
+        }
+      }
+    }
+  },
+  "evidenceSteps": [
+    {
+      "ordinal": 1,
+      "id": "0-1",
+      "kind": "navigate",
+      "status": "passed",
+      "summary": "navigate: Navigate to http://localhost:8765/",
+      "url": "http://localhost:8765/"
+    },
+    {
+      "ordinal": 2,
+      "id": "0-2",
+      "kind": "click",
+      "status": "passed",
+      "summary": "click: Clicking Developer Settings",
+      "url": "http://localhost:8765/"
+    },
+    {
+      "ordinal": 3,
+      "id": "0-3",
+      "kind": "click",
+      "status": "passed",
+      "summary": "click: Clicking API Keys",
+      "url": "http://localhost:8765/"
+    },
+    {
+      "ordinal": 4,
+      "id": "0-4",
+      "kind": "click",
+      "status": "passed",
+      "summary": "click: Clicking Generate Key",
+      "url": "http://localhost:8765/"
+    },
+    {
+      "ordinal": 5,
+      "id": "0-5",
+      "kind": "analyze",
+      "status": "passed",
+      "summary": "analyze: ANALYZE(textual_visual, 'a message confirming that an API key was generated is v",
+      "url": "http://localhost:8765/"
+    },
+    {
+      "ordinal": 6,
+      "id": "0-6",
+      "kind": "assert",
+      "status": "passed",
+      "summary": "assert: a message confirming that an API key was generated is visible",
+      "url": "http://localhost:8765/"
+    }
+  ],
+  "failureMessage": null
+}

@@ -4,14 +4,20 @@
     {
       "name": "acmedesk",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev:acmedesk"],
+      "runtimeArgs": [
+        "run",
+        "dev:acmedesk"
+      ],
       "port": 5174,
       "url": "http://127.0.0.1:5174"
     },
     {
       "name": "docs",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev:docs"],
+      "runtimeArgs": [
+        "run",
+        "dev:docs"
+      ],
       "port": 5175,
       "url": "http://127.0.0.1:5175"
     }

@@ -1,0 +1,63 @@
+{
+  "name": "acmedesk-apikey-outdated",
+  "note": "Sanitized from a real Kane CLI 0.10.5 run. Allow-listed fields only; account, path and link data removed.",
+  "exitCode": 1,
+  "appOrigin": "http://127.0.0.1:5174",
+  "cliVersion": "0.10.5",
+  "progress": [
+    {
+      "step": 2,
+      "status": "running",
+      "remark": "Step 1"
+    },
+    {
+      "step": 2,
+      "status": "done",
+      "remark": "navigate: Navigate to http://127.0.0.1:5174/"
+    },
+    {
+      "step": 3,
+      "status": "running",
+      "remark": "Step 2"
+    },
+    {
+      "step": 3,
+      "status": "failed",
+      "remark": "wait: Waiting locate the exact 'Settings' element on the Dashboard"
+    }
+  ],
+  "runEnd": {
+    "type": "run_end",
+    "status": "failed",
+    "summary": "The documented test step expects the exact label “Settings.” The loaded dashboard instead presents “Workspace Settings” and “Developer Settings,” so the required element was not present and the assertion failed before the API-key flow could begin.\nUpdate the test documentation and locator to the intended settings destination, then rerun the API-key creation flow.",
+    "one_liner": "The run stopped because it looked for a dashboard item named “Settings,” but the available items use different names.",
+    "reason": "The Dashboard has only 'Workspace Settings' and 'Developer Settings', not the exact label 'Settings'.",
+    "reason_code": "assertion_error.step_not_achievable",
+    "result_code": 750,
+    "duration": 34.3,
+    "credits_consumed": 11.317517500000001,
+    "final_state": {},
+    "context": {
+      "memory": {}
+    }
+  },
+  "evidenceSteps": [
+    {
+      "ordinal": 1,
+      "id": "0-1",
+      "kind": "navigate",
+      "status": "passed",
+      "summary": "navigate: Navigate to http://127.0.0.1:5174/",
+      "url": "http://127.0.0.1:5174/"
+    },
+    {
+      "ordinal": 2,
+      "id": "0-2",
+      "kind": "",
+      "status": "failed",
+      "summary": "wait: Waiting locate the exact 'Settings' element on the Dashboard",
+      "url": "http://127.0.0.1:5174/"
+    }
+  ],
+  "failureMessage": "The Dashboard has only 'Workspace Settings' and 'Developer Settings', not the exact label 'Settings'."
+}

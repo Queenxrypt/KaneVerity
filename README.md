@@ -57,7 +57,8 @@ The orchestrator runs Kane CLI and Claude Code as local processes, so the full w
 | Repository scaffolding | ✅ This commit |
 | AcmeDesk demo app | ✅ Built (`apps/acmedesk`) |
 | AcmeDesk Docs | ✅ Built (`apps/docs`) |
-| Orchestrator (discovery, Kane runner, Claude correction, retest) | ⏳ Not started |
+| Orchestrator: discovery, extraction, Kane runner, evidence, classification (4a) | ✅ Built (`apps/orchestrator`) |
+| Claude correction and retest | ⏳ Not started |
 | KaneVerity UI | ⏳ Not started |
 
 ## Prerequisites
@@ -122,6 +123,34 @@ npm run test:docs           # safety, line-mapping and routing self-check
 - **Safety:** documentation is treated as untrusted. Raw HTML is shown as text, only `http`, `https`, `mailto` and relative links are allowed, and every response sends a script-free Content-Security-Policy plus `nosniff`, `no-referrer` and `no-store` headers. Only GET and HEAD are accepted, and only `/guides/<slug>` and `/tutorials/<slug>` pages are served.
 
 The answer key for the demo is in [`docs/DEMO_SCENARIO.md`](docs/DEMO_SCENARIO.md). It is for humans only and is never served, read by the orchestrator, or given to Kane or Claude. Verification design rules are in [`docs/VERIFICATION_RULES.md`](docs/VERIFICATION_RULES.md).
+
+## KaneVerity orchestrator (local API)
+
+The orchestrator is a local service on `http://127.0.0.1:4000`. It discovers tutorials, builds the Kane instructions, runs Kane CLI one job at a time, reads the evidence, and classifies each run. It uses Node's built-in `http` module and one dependency, [`parse5`](https://github.com/inikulin/parse5), to parse documentation HTML as data.
+
+```bash
+npm run dev:docs            # docs on :5175
+npm run dev:acmedesk        # app on :5174
+npm run dev:orchestrator    # API on :4000
+npm run test:orchestrator   # unit, security and fake-Kane end-to-end tests (no credits)
+```
+
+> **Start the orchestrator from a normal terminal.** When it was launched by an IDE or app "preview" runner, Kane CLI could not resolve your logged-in Test Manager credentials and exited at setup ("Project and folder must be configured", exit 2). KaneVerity correctly reported that run as BLOCKED, with 0 credits used. Started with `npm run dev:orchestrator` in a terminal, the same run worked.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/health` | Docs and app reachability, Kane installed and logged in (exit code only), credit budget |
+| `POST /api/project` | Connect a docs URL and an app URL |
+| `POST /api/discover` | Discover tutorials (sitemap and links, same origin only) |
+| `POST /api/runs` | Queue Kane runs for tutorial ids |
+| `GET /api/runs/:id` | UI-safe run record. `/events` streams it live, `/screens/<n>.jpg` serves approved screenshots, `/cancel` cancels |
+
+- **MVP scope:** live verification runs **only** against the controlled local AcmeDesk demo (`127.0.0.1:5174`) and its docs (`127.0.0.1:5175`). Arbitrary third-party documentation is **not** supported for live execution yet. Kane's instructions and the post-run URL check are safeguards, not a hard browser-domain restriction.
+- **Kane receives the documentation as written:** a fixed KaneVerity rules header, then the extracted steps word for word, then one `Assert that:` line per documented expected outcome. Kane is started as `node <kane-cli.cjs> run …`, with no shell.
+- **Classification** follows [`docs/VERIFICATION_RULES.md`](docs/VERIFICATION_RULES.md). PASSED needs a passing Kane assertion matched to every documented outcome. FAILED needs a failure traced to exactly one documented step or outcome. Anything less certain is NEEDS REVIEW, and external problems are BLOCKED.
+- **Privacy:** raw Kane output, stderr and evidence packs stay in `data/runs/<id>/private/` (git-ignored, never served). The UI gets an allow-listed, scrubbed record, and a screenshot is shown only if its step was on the demo app origin.
+- **Credits:** one Kane run at a time, with a hard limit (default 100) tracked in `data/credits.json`. Requests that could exceed it are refused before Kane starts.
+- **API protection:** loopback only, a Host-header check, and every mutating request needs `X-KaneVerity: 1`, a JSON body and an allowed Origin. No CORS headers are sent.
 
 ## Security notes
 
