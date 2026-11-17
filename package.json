@@ -9,7 +9,10 @@
     "dev:acmedesk": "npm run dev --workspace acmedesk",
     "build:acmedesk": "npm run build --workspace acmedesk",
     "typecheck:acmedesk": "npm run typecheck --workspace acmedesk",
-    "preview:acmedesk": "npm run preview --workspace acmedesk"
+    "preview:acmedesk": "npm run preview --workspace acmedesk",
+    "dev:docs": "npm run dev --workspace acmedesk-docs",
+    "typecheck:docs": "npm run typecheck --workspace acmedesk-docs",
+    "test:docs": "npm run test --workspace acmedesk-docs"
   },
   "engines": {
     "node": ">=18"

@@ -1,0 +1,22 @@
+{
+  "name": "acmedesk-docs",
+  "private": true,
+  "version": "0.1.0",
+  "description": "AcmeDesk Docs: Markdown tutorials served as safe, structured HTML for KaneVerity discovery.",
+  "type": "module",
+  "scripts": {
+    "dev": "node server.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node scripts/self-check.ts"
+  },
+  "dependencies": {
+    "marked": "^18.2.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

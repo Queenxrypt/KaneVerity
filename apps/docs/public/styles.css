@@ -1,0 +1,57 @@
+/* AcmeDesk Docs. Plain CSS, served from the same origin (CSP: style-src 'self'). */
+
+:root {
+  --bg: #ffffff;
+  --surface: #f7f8fa;
+  --border: #e3e6eb;
+  --text: #1d2330;
+  --muted: #5d6879;
+  --brand: #3b5bdb;
+  --note-bg: #eef3ff;
+  --note-border: #9fb3f5;
+  --warn-bg: #fff6e5;
+  --warn-border: #f0c36d;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  color: var(--text);
+  background: var(--bg);
+  line-height: 1.6;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+a { color: var(--brand); }
+code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-size: 0.9em; background: var(--surface); padding: 0.1em 0.35em; border-radius: 4px; }
+
+.topbar { border-bottom: 1px solid var(--border); padding: 0.9rem 1.5rem; }
+.brand { font-weight: 700; font-size: 1.1rem; color: var(--text); text-decoration: none; }
+
+.layout { display: flex; max-width: 1100px; margin: 0 auto; }
+.sidebar { width: 250px; flex-shrink: 0; padding: 1.5rem 1rem; border-right: 1px solid var(--border); }
+.sidebar h2 { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin: 1.25rem 0 0.4rem; }
+.sidebar h2:first-child { margin-top: 0; }
+.sidebar ul { list-style: none; padding: 0; margin: 0; }
+.sidebar a { display: block; padding: 0.3rem 0.5rem; border-radius: 6px; text-decoration: none; color: var(--text); }
+.sidebar a:hover { background: var(--surface); }
+.sidebar a.active { background: var(--note-bg); color: var(--brand); font-weight: 600; }
+
+main { flex: 1; padding: 2rem 2.5rem 4rem; max-width: 760px; }
+h1 { font-size: 1.9rem; line-height: 1.25; margin: 0.25rem 0 0.25rem; }
+h2 { font-size: 1.25rem; margin-top: 2rem; }
+.lead { font-size: 1.1rem; color: var(--muted); }
+.meta { color: var(--muted); font-size: 0.875rem; margin-top: 0; }
+.breadcrumb { font-size: 0.875rem; color: var(--muted); }
+
+ol.steps { padding-left: 1.5rem; }
+ol.steps li { margin: 0.4rem 0; padding-left: 0.25rem; }
+ul.outcomes li { margin: 0.3rem 0; }
+
+.callout { border: 1px solid; border-left-width: 4px; border-radius: 6px; padding: 0.6rem 1rem; margin: 1.5rem 0; }
+.callout p { margin: 0.25rem 0; }
+.callout-note, .callout-tip { background: var(--note-bg); border-color: var(--note-border); }
+.callout-warning { background: var(--warn-bg); border-color: var(--warn-border); }
+
+@media (max-width: 720px) {
+  .layout { flex-direction: column; }
+  .sidebar { width: auto; border-right: none; border-bottom: 1px solid var(--border); }
+  main { padding: 1.25rem 1rem 3rem; }
+}

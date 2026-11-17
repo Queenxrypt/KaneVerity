@@ -56,7 +56,7 @@ The orchestrator runs Kane CLI and Claude Code as local processes, so the full w
 | Kane CLI install, login and spike runs | ✅ Verified locally (Kane CLI 0.10.5) |
 | Repository scaffolding | ✅ This commit |
 | AcmeDesk demo app | ✅ Built (`apps/acmedesk`) |
-| AcmeDesk Docs | ⏳ Not started |
+| AcmeDesk Docs | ✅ Built (`apps/docs`) |
 | Orchestrator (discovery, Kane runner, Claude correction, retest) | ⏳ Not started |
 | KaneVerity UI | ⏳ Not started |
 
@@ -106,11 +106,29 @@ Generated keys look like `demo_fake_key_0002`. They are fake placeholder values,
 
 Confirmations appear in a persistent `role="status"` region (with a `data-testid`) and do not auto-dismiss, so Kane has time to observe them. Unknown URLs, such as old documented paths, show a "Page not found" page.
 
+## AcmeDesk Docs (demo documentation)
+
+A small documentation site for AcmeDesk, rendered from Markdown on every request so approved corrections show up immediately. It uses Node's built-in `http` module and one dependency, [`marked`](https://github.com/markedjs/marked).
+
+```bash
+npm run dev:docs            # http://127.0.0.1:5175
+npm run typecheck:docs
+npm run test:docs           # safety, line-mapping and routing self-check
+```
+
+- **Content:** `apps/docs/content/guides/*.md` (concept pages) and `apps/docs/content/tutorials/*.md` (four tutorials, two of them deliberately outdated).
+- **Tutorial format:** frontmatter (`type: tutorial`, `id`, `title`, `app_start`, `last_reviewed`), then `## Steps` (one action per numbered item, UI labels in **bold**, typed values in `code`), then `## Expected outcome` (a bullet list of observable results). Notes and warnings are blockquotes starting with `**Note:**`, `**Warning:**` or `**Tip:**` and are never treated as steps.
+- **Machine-readable markers:** each step and outcome is rendered with `data-kv`, `data-source-file`, `data-source-line` and `data-source-text`. Each page carries `data-source-sha256`. Line numbers are recalculated from the current file on every request.
+- **Safety:** documentation is treated as untrusted. Raw HTML is shown as text, only `http`, `https`, `mailto` and relative links are allowed, and every response sends a script-free Content-Security-Policy plus `nosniff`, `no-referrer` and `no-store` headers. Only GET and HEAD are accepted, and only `/guides/<slug>` and `/tutorials/<slug>` pages are served.
+
+The answer key for the demo is in [`docs/DEMO_SCENARIO.md`](docs/DEMO_SCENARIO.md). It is for humans only and is never served, read by the orchestrator, or given to Kane or Claude. Verification design rules are in [`docs/VERIFICATION_RULES.md`](docs/VERIFICATION_RULES.md).
+
 ## Security notes
 
 - Never commit `.env`, credentials or tokens. Kane authentication is stored by Kane outside this repo.
 - Kane evidence packs (`.testmuai/`, `*.evidence`) and runtime data (`data/`) are git-ignored by default, because they can contain screenshots and network logs.
 - KaneVerity does not run commands taken from documentation content.
+- Known dev-only advisory: `npm audit` reports GHSA-fc5q-39xc-vjpf (picomatch ReDoS) through Vite's file watcher. No patched picomatch exists yet, it is not in any production bundle (`npm audit --omit=dev` reports 0), and the affected patterns come only from Vite's own configuration. Update once picomatch publishes a fix.
 
 ## Project documents
 
