@@ -9,6 +9,7 @@ This file contains no application answers and is not used at runtime.
 - KaneVerity owns the Kane objective wrapper, the start URL and the browser restrictions. Extracted steps and outcomes are inserted as quoted, numbered items only.
 - The application URL comes from the user's project settings, never from documentation. `app_start` from frontmatter may only be a relative path on that same origin.
 - The objective tells Kane to stay on the application origin and to fail rather than follow links elsewhere. Any step containing a URL outside the application origin is rejected before a run, with status NEEDS REVIEW.
+- **External navigation is detected, not prevented.** Kane CLI has no browser-domain restriction option. KaneVerity cannot stop the browser from visiting another origin during a run. Instead it records every origin seen in the evidence after the run (`visitedOrigins`). A verification run with an unexpected origin is NEEDS REVIEW, and an exploration or retest with an unexpected origin is rejected (route not confirmed / not verified).
 - Steps and outcomes are length-limited, stripped of control characters, and never executed as commands. Documentation fetching is limited to the configured docs origin.
 - The docs server renders raw HTML as text, allows only safe link schemes, and sends a script-free Content-Security-Policy.
 
@@ -41,18 +42,63 @@ This file contains no application answers and is not used at runtime.
 
 ## 6. Claude correction loop
 
-- Claude runs in a new temporary folder outside the repository. It sees only a copy of the affected tutorial, a `finding.json`, and sanitized evidence. It never sees the answer key, `AGENTS.md`, the project brief, the application source or the correct path.
-- Tools are limited to reading inside that folder, with no shell, editing, network access or other folders. The exact `claude` flags are confirmed from `claude --help` when this is built.
-- **Navigation context in the evidence:** the failing step's text and source line, Kane's reason and reason code, the URL at failure, the per-step results, screenshots of the failing step and the last successful step, and the visible navigation and button labels that Kane reported or that appear in the evidence.
-- **Sanitized:** account email, username, org, project and test-case IDs, Test Manager share links, local file paths and raw logs are removed.
-- **Claude must not invent a route.** It returns either:
-  - `proposal`: replacement or removal of specific source lines, where every UI label it uses must appear in the evidence. The orchestrator checks this and rejects a proposal that uses an unseen label.
-  - `needs_exploration`: a question for Kane, such as where an API key can be generated starting from the Dashboard.
-- On `needs_exploration`, KaneVerity runs a separate Kane exploration run against the same app, adds that evidence to the package, and asks Claude again. Exploration runs are labelled as such and never count as verification.
-- The orchestrator, not Claude, produces the unified diff, keeps the original, and applies it only after human approval.
-- After approval, Kane reruns the corrected tutorial. **VERIFIED** comes only from that retest meeting the PASSED rule above.
+**Isolation.** Claude Code runs headless in a new temporary folder outside the repository:
+
+```
+claude.exe -p <fixed instructions> --output-format json --json-schema <schema>
+  --tools Read --restricted --strict-mcp-config --disable-slash-commands
+  --no-session-persistence --permission-mode dontAsk --permission-prompts none
+  --max-budget-usd 1
+```
+
+It is started directly (no shell). It has only the Read tool, confined to the package folder, with no shell, web, MCP servers, skills, or user/project/local settings. The folder is deleted after the call, and an audit copy is kept in `data/corrections/<id>/package-<n>/` (git-ignored). The isolation is checked by a probe that reads Claude Code's own startup record and attempts to read a sentinel file outside the folder.
+
+**Package (sanitized).** `tutorial.md`, `tutorial-numbered.txt`, `finding.json` (tutorial steps and outcomes with lines, the original run's status, failed step, Kane's reason, reason code, label and per-step log, and the exploration evidence if any), and approved screenshots only. Never included: the answer key, `AGENTS.md`, the brief, the application source, credentials, raw logs, evidence packs, IDs, share links or local paths.
+
+**D2: Claude first.** Claude reviews the finding and answers `proposal`, `needs_exploration` or `cannot_determine`. Its `explorationQuestion` is only displayed. Kane's exploration objective comes from a fixed KaneVerity template plus the tutorial's title, typed values and documented outcomes, quoted as data.
+
+**D4: exploration gate.** An exploration run (`kind: exploration`) never counts as verification. It confirms the route only if Kane exited 0, `run_end` passed, every documented outcome was matched to a distinct passing assertion, the evidence pack is valid and finalized, passed click/type actions were recorded, and no unexpected origin was recorded. Without a confirmed route, no correction can be proposed, whatever Claude answers.
+
+**D3: label evidence.** Every UI label in a changed or inserted step must be supported by specific exploration evidence, cited by run, step ordinal and screenshot where available. Each label's role comes from the step's wording:
+- **Target** ("click/select/choose/open/press/tap **X**", and any bold label whose role can't be recognised): supported **only** by a **distinct**, passed Kane click action whose recorded target is **exactly** X. The match is case-sensitive, X must directly follow the action verb, and it must be the whole target: "Clicking Billing Settings link" supports "Billing Settings", not "Billing", and "Clicking 2 Billing Settings" supports "2 Billing Settings", not "Billing Settings". Each target needs its own action. Assertions and stored values **never** support a target.
+- **Location** ("On the **X**", "In **X**"): a stored exploration value equal to X (for example the start page heading), a passing exploration assertion that mentions X, or a click on exactly X.
+- **Value** (`` `X` ``): a passed type/fill/select action containing X, or a stored or asserted value.
+
+The cited target actions must be in the order Kane performed them. A failure summary alone never counts.
+
+**Page-transition safeguard.** Each Kane evidence step records the page it was performed on. For the cited target clicks:
+- the first one must happen on the exploration's start page
+- for consecutive clicks A then B on different pages, the step immediately after A must already be on B's page (the transition is established by A), with no navigate step between them
+- clicks on the same page need no transition (legitimate same-page actions such as a button that updates the current page)
+
+Otherwise the proposal is rejected.
+
+**Exploration modes.** An exploration uses one allow-listed mode. Each mode's text is fixed by KaneVerity and names no application labels:
+- `default`: the standard template
+- `main-navigation` ("Explore using the main navigation menu"): adds one rule telling Kane to navigate with the left-hand main navigation menu instead of the starting page's summary cards
+
+The mode is chosen by the user and recorded on the run, in the correction's exploration history and audit log, and in Claude's package. Choosing a mode is an editorial preference, not evidence: the D3, D4 and VERIFIED gates are unchanged. Earlier explorations and their evidence are never deleted.
+
+**D5: scope.** Only lines inside the Steps list may be replaced, deleted or inserted. Expected outcomes, the introduction and frontmatter must stay byte-for-byte identical. New text may not contain links, web addresses, HTML, control characters or instruction-like wording. Steps are renumbered automatically.
+
+**Applying.** The orchestrator, not Claude, produces the unified diff, keeps the original and a backup, and writes the file only after human approval, only inside `apps/docs/content/` (D1), and only if the file still has the fingerprint that was reviewed. **Approve & apply** writes the correction only: it records one `applied` audit event, leaves the correction in the `applied` state, and starts no Kane run.
+
+**Retest.** **Start Kane retest** is a separate, explicitly confirmed action, accepted only for a correction in the `applied` state (a second request while one is starting is refused).
+
+**D6: VERIFIED.** The rules below are unchanged by this split. Kane retests (`kind: retest`) the tutorial as re-extracted from the live docs page. The correction is VERIFIED only if all of the following hold:
+- the live page fingerprint equals the approved document's fingerprint
+- the first evidence step is a fresh load of the start URL (clean state)
+- Kane exited 0 and `run_end` passed
+- every documented outcome is matched to a distinct passing assertion
+- the evidence pack is valid and finalized
+- no unexpected origin was recorded
+
+Anything missing, conflicting or inconclusive leaves the correction open. Claude's conclusions never count.
+
+**Approval of spend.** Every Claude call and every Kane run (exploration, retest) needs an explicit confirmation. Approving a correction is not a confirmation to retest it. There is no internal spending ceiling. Each run records its actual Kane-reported cost, or a clearly labelled estimate if Kane reported none.
 
 ## 7. Evidence privacy
 
 - Kane evidence packs (`.evidence`), `.testmuai/`, `.context/` and runtime data are git-ignored.
 - Kane evidence contains the TestMu account email, username, org ID, share links and local paths. These are stripped before anything is shown in the UI, stored outside Kane's own folders, or sent to Claude.
+- Correction records, originals, proposals, backups and Claude package copies live in `data/corrections/` (git-ignored). The UI shows only KaneVerity's sanitized run and correction views: no raw packs, share links, account details or local paths.

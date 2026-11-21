@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Link, useParams, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, ApiError, ORCHESTRATOR_DOWN, subscribeRun, type Transport } from '../api.ts';
-import { Card, Collapsible, ErrorNote, formatTime, SourceRef, StatusBadge } from '../components/ui.tsx';
+import { Card, Collapsible, ConfirmDialog, ErrorNote, formatTime, RunCost, SourceRef, StatusBadge } from '../components/ui.tsx';
 import type { PublicRun } from '../types.ts';
 
 const STEP_STYLE: Record<string, string> = {
@@ -66,6 +66,23 @@ export function RunDetail() {
   const [error, setError] = useState<string | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [confirmCorrection, setConfirmCorrection] = useState(false);
+  const [starting, setStarting] = useState(false);
+  const navigate = useNavigate();
+
+  async function startCorrection() {
+    setStarting(true);
+    setError(null);
+    try {
+      const c = await api.startCorrection(runId);
+      navigate(`/corrections/${c.id}`);
+    } catch (e) {
+      setError((e as Error).message);
+      setConfirmCorrection(false);
+    } finally {
+      setStarting(false);
+    }
+  }
 
   useEffect(() => {
     let unsub: (() => void) | null = null;
@@ -122,7 +139,17 @@ export function RunDetail() {
         </Link>
         <div className="mt-2 flex flex-wrap items-center gap-3">
           <h1 className="text-2xl font-bold">{t?.title ?? 'Verification run'}</h1>
-          <StatusBadge run={run} large />
+          {run.kind === 'exploration' ? (
+            <span className="inline-flex items-center rounded-full border border-brand/30 bg-brand-soft px-3 py-1 text-sm font-semibold text-brand">EXPLORATION</span>
+          ) : (
+            <StatusBadge run={run} large />
+          )}
+          {run.kind === 'exploration' && (
+            <span data-testid="exploration-mode" className="rounded-full border border-slate-300 px-2 py-0.5 text-xs font-medium text-slate-600">
+              mode: {run.explorationMode ?? 'default'}
+            </span>
+          )}
+          {run.kind === 'retest' && <span className="rounded-full border border-slate-300 px-2 py-0.5 text-xs font-medium text-slate-600">Retest</span>}
           {active && (
             <button type="button" onClick={cancel} disabled={cancelling} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium hover:bg-slate-50 disabled:opacity-50">
               {cancelling ? 'Cancelling…' : 'Cancel run'}
@@ -135,7 +162,7 @@ export function RunDetail() {
           </span>
           {run.startedAt && <span>Started {formatTime(run.startedAt)}</span>}
           {run.durationSec != null && <span>{run.durationSec}s</span>}
-          {run.credits != null && <span>{run.credits} credits</span>}
+          {run.state === 'finished' && <span data-testid="run-cost"><RunCost run={run} /></span>}
           {run.cliVersion && <span>Kane CLI {run.cliVersion}</span>}
           {active && transport && <span data-testid="transport">Updates: {transport === 'live' ? 'live stream' : 'polling every 3s'}</span>}
         </div>
@@ -157,18 +184,35 @@ export function RunDetail() {
       )}
 
       {c && (
-        <Card title="Why this status">
-          <p className="text-sm" data-testid="explanation">
-            {c.explanation}
-          </p>
-          <p className="mt-2 text-sm">
-            Documentation defect: <strong>{c.documentationDefect ? 'Yes' : 'No'}</strong>
-            {c.status === 'BLOCKED' && ' (an external condition prevented a result)'}
-            {c.status === 'NEEDS_REVIEW' && ' (the evidence is inconclusive)'}
-          </p>
-          {c.documentationDefect && (
-            <button type="button" disabled className="mt-3 rounded-md border border-slate-300 px-3 py-1.5 text-sm text-slate-500" title="Available in Step 5">
-              Propose correction (coming in Step 5)
+        <Card title={run.kind === 'exploration' ? 'Exploration result' : 'Why this status'}>
+          {run.kind === 'exploration' ? (
+            <p className="text-sm" data-testid="explanation">
+              This was a Kane <strong>exploration</strong> run for a correction. It does not verify documentation. It only records how the task is done today and whether every documented outcome was reached.
+              {c.status === 'PASSED' ? ' Every documented outcome was reached with a distinct passing assertion.' : ` Outcomes not all proven (${c.explanation})`}
+            </p>
+          ) : (
+            <>
+              <p className="text-sm" data-testid="explanation">
+                {c.explanation}
+              </p>
+              <p className="mt-2 text-sm">
+                Documentation defect: <strong>{c.documentationDefect ? 'Yes' : 'No'}</strong>
+                {c.status === 'BLOCKED' && ' (an external condition prevented a result)'}
+                {c.status === 'NEEDS_REVIEW' && ' (the evidence is inconclusive)'}
+              </p>
+            </>
+          )}
+          {run.correctionId && (
+            <p className="mt-2 text-sm">
+              Part of correction{' '}
+              <Link to={`/corrections/${run.correctionId}`} className="font-mono text-xs text-brand hover:underline">
+                {run.correctionId}
+              </Link>
+            </p>
+          )}
+          {c.documentationDefect && run.kind !== 'exploration' && (
+            <button type="button" onClick={() => setConfirmCorrection(true)} className="mt-3 rounded-md bg-brand px-3 py-1.5 text-sm font-semibold text-white hover:opacity-90">
+              Propose correction
             </button>
           )}
         </Card>
@@ -262,6 +306,11 @@ export function RunDetail() {
               ))}
             </ul>
           )}
+          {run.visitedOrigins && run.visitedOrigins.length > 0 && (
+            <p className="mb-3 text-xs text-slate-600" data-testid="visited-origins">
+              Origins recorded in the evidence: <span className="font-mono">{run.visitedOrigins.join(', ')}</span>. External navigation is <strong>detected after the run</strong> from this evidence; it is not prevented during the run.
+            </p>
+          )}
           <Screenshots run={run} />
         </Card>
       )}
@@ -305,6 +354,18 @@ export function RunDetail() {
           </ol>
         </Collapsible>
       )}
+      <ConfirmDialog
+        open={confirmCorrection}
+        title="Ask Claude to review this finding?"
+        confirmLabel="Ask Claude"
+        busy={starting}
+        onCancel={() => setConfirmCorrection(false)}
+        onConfirm={() => void startCorrection()}
+      >
+        <p>Claude Code reviews a sanitized package (this tutorial, the failed step and Kane's evidence) in an isolated folder, with read-only access to that folder only.</p>
+        <p>It may only propose a correction once a Kane exploration has confirmed the route. Nothing changes without your approval, and only a Kane retest can mark it VERIFIED.</p>
+        <p>This makes a real Claude Code call (capped at $1). No Kane credits are used at this stage.</p>
+      </ConfirmDialog>
     </div>
   );
 }

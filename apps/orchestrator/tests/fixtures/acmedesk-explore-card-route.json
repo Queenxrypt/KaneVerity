@@ -1,0 +1,140 @@
+{
+  "name": "acmedesk-explore-card-route",
+  "note": "Sanitized from real Kane CLI 0.10.5 exploration r20261119-150019-dc9968 (allow-listed fields only). Kane reached the API Keys page via the Dashboard summary card \"1 API keys\", not the sidebar.",
+  "runId": "r20261119-150019-dc9968",
+  "exitCode": 0,
+  "kaneStatus": "passed",
+  "visitedOrigins": [
+    "http://127.0.0.1:5174"
+  ],
+  "evidenceSteps": [
+    {
+      "ordinal": 1,
+      "id": "0-1",
+      "kind": "navigate",
+      "status": "passed",
+      "summary": "navigate: Navigate to http://127.0.0.1:5174",
+      "url": "http://127.0.0.1:5174/"
+    },
+    {
+      "ordinal": 2,
+      "id": "0-2",
+      "kind": "analyze",
+      "status": "passed",
+      "summary": "analyze: ANALYZE(textual_visual, 'the main heading of the starting page is stored as {{st",
+      "url": "http://127.0.0.1:5174/"
+    },
+    {
+      "ordinal": 3,
+      "id": "0-3",
+      "kind": "click",
+      "status": "passed",
+      "summary": "click: Clicking 1 API keys",
+      "url": "http://127.0.0.1:5174/"
+    },
+    {
+      "ordinal": 4,
+      "id": "0-4",
+      "kind": "click",
+      "status": "passed",
+      "summary": "click: Clicking Generate Key button in the API Keys page",
+      "url": "http://127.0.0.1:5174/developer/api-keys"
+    },
+    {
+      "ordinal": 5,
+      "id": "0-5",
+      "kind": "analyze",
+      "status": "passed",
+      "summary": "analyze: The key count below the list shows '2 keys'.",
+      "url": "http://127.0.0.1:5174/developer/api-keys"
+    },
+    {
+      "ordinal": 6,
+      "id": "0-6",
+      "kind": "assert",
+      "status": "passed",
+      "summary": "assert: The message 'API key generated successfully.' appears.",
+      "url": "http://127.0.0.1:5174/developer/api-keys"
+    },
+    {
+      "ordinal": 7,
+      "id": "0-7",
+      "kind": "assert",
+      "status": "passed",
+      "summary": "assert: The new key is added to the API keys list.",
+      "url": "http://127.0.0.1:5174/developer/api-keys"
+    },
+    {
+      "ordinal": 8,
+      "id": "0-8",
+      "kind": "assert",
+      "status": "passed",
+      "summary": "assert: The key count below the list shows '2 keys'.",
+      "url": "http://127.0.0.1:5174/developer/api-keys"
+    }
+  ],
+  "assertions": [
+    {
+      "key": "start_page_heading",
+      "query": "the main heading text of the starting page | the main heading of the starting page is stored as {{start_page_heading}} | Extracting the starting page heading",
+      "extracted": "Dashboard",
+      "passed": false,
+      "isCheck": false
+    },
+    {
+      "key": "api_key_generated_successfully_message",
+      "query": "whether the API key generated successfully message is present in the generation status message | The message 'API key generated successfully.' appears. | Checking whether the API key generation success message is present",
+      "extracted": "true",
+      "passed": true,
+      "isCheck": true
+    },
+    {
+      "key": "new_key_api_keys_list",
+      "query": "whether the new generated API key is present in the API keys list | The new key is added to the API keys list. | Checking whether the new API key is present in the API keys list",
+      "extracted": "true",
+      "passed": true,
+      "isCheck": true
+    },
+    {
+      "key": "api_keys_count",
+      "query": "the key count shown below the API keys list | The key count below the list shows '2 keys'. | Reading the API keys count below the list",
+      "extracted": "2 keys",
+      "passed": true,
+      "isCheck": true
+    }
+  ],
+  "screenshots": [
+    {
+      "ordinal": 1,
+      "file": "1.jpg"
+    },
+    {
+      "ordinal": 2,
+      "file": "2.jpg"
+    },
+    {
+      "ordinal": 3,
+      "file": "3.jpg"
+    },
+    {
+      "ordinal": 4,
+      "file": "4.jpg"
+    },
+    {
+      "ordinal": 5,
+      "file": "5.jpg"
+    },
+    {
+      "ordinal": 6,
+      "file": "6.jpg"
+    },
+    {
+      "ordinal": 7,
+      "file": "7.jpg"
+    },
+    {
+      "ordinal": 8,
+      "file": "8.jpg"
+    }
+  ]
+}

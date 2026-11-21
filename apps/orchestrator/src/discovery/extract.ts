@@ -18,7 +18,7 @@ export const LIMITS = { maxItemChars: 300, maxSteps: 20, maxOutcomes: 10, maxJso
 
 const STEP_HEADING = /^(steps|procedure|instructions|how to\b.*|step-by-step.*)$/i;
 const OUTCOME_HEADING = /^(expected (outcome|result)s?|results?|what you should see|verify( the result)?|verification)$/i;
-const INJECTION = /\b(ignore|disregard|forget)\b[^.]{0,40}\b(previous|prior|above|earlier|all)\b[^.]{0,20}\b(instructions?|rules?|steps?)\b|\bsystem prompt\b|\byou are now\b|\bnew instructions?\b|\boverride\b[^.]{0,30}\brules?\b/i;
+export const INJECTION = /\b(ignore|disregard|forget)\b[^.]{0,40}\b(previous|prior|above|earlier|all)\b[^.]{0,20}\b(instructions?|rules?|steps?)\b|\bsystem prompt\b|\byou are now\b|\bnew instructions?\b|\boverride\b[^.]{0,30}\brules?\b/i;
 
 export type PageResult = { kind: 'tutorial'; tutorial: Tutorial } | { kind: 'other'; page: OtherPage };
 

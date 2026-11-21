@@ -70,12 +70,26 @@ const EXPECTED: Record<string, { steps: string[]; outcomes: string[] }> = {
   },
 };
 
+// Corrections approved by a human and VERIFIED by an independent Kane retest
+// (correction c20261119-131002-af5614, retest r20261121-151934-c23cad).
+const APPROVED_CORRECTIONS: Record<string, { sha256: string; steps: string[] }> = {
+  'generate-an-api-key': {
+    sha256: '459c70b8b6a91282a0daddb76a1d24f902d6856f85ede471265dbe2808b8b8ff',
+    steps: ['In the left navigation menu, click **Developer Settings**.', 'Click **API Keys**.', 'Click **Generate Key**.'],
+  },
+};
+
 async function main() {
   console.log('1. Tutorial content and source-line mapping');
-  for (const [slug, exp] of Object.entries(EXPECTED)) {
+  for (const [slug, base] of Object.entries(EXPECTED)) {
     const doc = await loadPage(DEFAULT_CONTENT_DIR, 'tutorials', slug);
     check(`${slug}: loads as tutorial`, doc?.meta.type === 'tutorial' && doc.meta.id === slug);
     if (!doc) continue;
+    // A tutorial may also be in one exact, human-approved and Kane-verified corrected
+    // version (pinned by fingerprint). Any other content fails.
+    const approved = APPROVED_CORRECTIONS[slug];
+    const exp = approved && doc.sha256 === approved.sha256 ? { ...base, steps: approved.steps } : base;
+    if (approved && doc.sha256 === approved.sha256) console.log(`  info ${slug}: approved corrected version ${approved.sha256.slice(0, 12)}`);
     check(`${slug}: steps exact`, JSON.stringify(doc.steps.map((s) => s.text)) === JSON.stringify(exp.steps));
     check(`${slug}: outcomes exact`, JSON.stringify(doc.outcomes.map((o) => o.text)) === JSON.stringify(exp.outcomes));
     check(`${slug}: notes/warnings are not steps`, !doc.steps.some((s) => /note|warning|tip/i.test(s.text)));

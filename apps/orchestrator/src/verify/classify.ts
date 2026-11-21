@@ -75,13 +75,13 @@ export function quotedValues(kaneText: string): string[] {
   return out;
 }
 
-function stepKind(s: EvidenceStep): string {
+export function stepKind(s: { kind: string; summary: string }): string {
   if (s.kind) return s.kind.toLowerCase();
   const m = /^([a-z_]+):/i.exec(s.summary.trim());
   return m ? m[1].toLowerCase() : '';
 }
 
-const ACTION_KINDS = new Set(['click', 'type', 'fill', 'select', 'press', 'hover', 'scroll', 'check', 'uncheck', 'upload', 'drag']);
+export const ACTION_KINDS = new Set(['click', 'type', 'fill', 'select', 'press', 'hover', 'scroll', 'check', 'uncheck', 'upload', 'drag']);
 
 function memoryAssertions(runEnd: RunEnd | null): Assertion[] {
   const mem = runEnd?.context?.memory;

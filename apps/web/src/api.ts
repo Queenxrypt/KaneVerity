@@ -1,7 +1,7 @@
 // Client for the local KaneVerity orchestrator (via the Vite /api proxy).
 // Every request carries X-KaneVerity: 1; mutating requests send JSON.
 
-import type { Discovery, Health, Project, PublicRun } from './types.ts';
+import type { Discovery, Health, Project, PublicCorrection, PublicRun } from './types.ts';
 
 export class ApiError extends Error {
   status: number;
@@ -48,6 +48,10 @@ export const api = {
   runs: () => request<PublicRun[]>('/runs'),
   run: (id: string) => request<PublicRun>(`/runs/${encodeURIComponent(id)}`),
   cancel: (id: string) => request<{ cancelled: boolean }>(`/runs/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: {} }),
+  startCorrection: (runId: string) => request<PublicCorrection>(`/runs/${encodeURIComponent(runId)}/corrections`, { method: 'POST', body: {} }),
+  corrections: () => request<PublicCorrection[]>('/corrections'),
+  correction: (id: string) => request<PublicCorrection>(`/corrections/${encodeURIComponent(id)}`),
+  correctionAction: (id: string, action: 'analyze' | 'explore' | 'approve' | 'retest' | 'reject' | 'restore', body: Record<string, unknown> = {}) => request<PublicCorrection>(`/corrections/${encodeURIComponent(id)}/${action}`, { method: 'POST', body }),
 };
 
 export type Transport = 'live' | 'polling';

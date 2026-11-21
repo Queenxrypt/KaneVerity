@@ -13,8 +13,8 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { copyFile, mkdir, readdir, writeFile, appendFile } from 'node:fs/promises';
 import path from 'node:path';
-import { config } from '../config.ts';
-import { addCredits, creditsSpent, newRunId, readJson, runDir, writeJson } from '../store.ts';
+import { config, estimateRange, unreportedEstimate } from '../config.ts';
+import { addCredits, creditLedger, newRunId, readJson, runDir, summarizeCosts, writeJson, type CostBasis, type CostSummary } from '../store.ts';
 import type { Classification, Project, RunState, Tutorial } from '../types.ts';
 import { resolveAppStart } from '../urls.ts';
 import { classify } from '../verify/classify.ts';
@@ -26,8 +26,40 @@ import { buildObjective } from './objective.ts';
 const MAX_LOG_BYTES = 2 * 1024 * 1024;
 const MAX_PUBLIC_SCREENSHOT_BYTES = 3 * 1024 * 1024;
 
+/**
+ * verification: checks a tutorial as documented.
+ * exploration:  Kane finds how a documented goal is done today. NEVER counts as verification.
+ * retest:       verification of a corrected tutorial, linked to a correction.
+ */
+export type RunKind = 'verification' | 'exploration' | 'retest';
+
+/** One Kane memory/assertion record, sanitized (no ids, no paths). */
+export interface AssertionRecord {
+  key: string;
+  query: string;
+  extracted: string | null;
+  passed: boolean;
+  isCheck: boolean;
+}
+
+export interface EnqueueOptions {
+  kind?: RunKind;
+  /** Exploration runs supply their own KaneVerity-built objective. */
+  objective?: { objective: string; mapping: RunRecord['objectiveMapping'] };
+  correctionId?: string;
+  /** Retest: fingerprint of the approved corrected document the docs page must match. */
+  expectedSourceSha256?: string;
+  /** Exploration: the allow-listed exploration mode used to build the objective. */
+  explorationMode?: string;
+}
+
 export interface RunRecord {
   runId: string;
+  kind?: RunKind;
+  correctionId?: string;
+  expectedSourceSha256?: string;
+  /** Exploration runs: allow-listed mode (e.g. "default", "main-navigation"). */
+  explorationMode?: string;
   state: RunState;
   tutorial: Tutorial;
   appOrigin: string;
@@ -40,8 +72,20 @@ export interface RunRecord {
   exitCode: number | null;
   cliVersion: string | null;
   durationSec: number | null;
+  /** Actual credits reported by Kane in run_end (null if Kane reported none). */
   credits: number | null;
+  /** reported | estimated | none (see store.ts CostBasis); absent while queued/running. */
+  costBasis?: CostBasis;
+  /** KaneVerity estimate, only when Kane reported no cost but did agent work. */
+  estimatedCredits?: number | null;
   kane: { status: string | null; reasonCode: string | null; reason: string | null; summary: string | null; triage: string | null };
+  /** Sanitized Kane memory records (assertions and stored values). */
+  assertions?: AssertionRecord[];
+  /**
+   * Origins seen in the evidence after the run. KaneVerity DETECTS unexpected
+   * origins after the fact; it cannot PREVENT the browser from visiting them.
+   */
+  visitedOrigins?: string[];
   progress: { step: number; status: string; remark: string }[];
   evidence: {
     found: boolean;
@@ -61,6 +105,9 @@ export interface RunRecord {
 export function publicRecord(r: RunRecord) {
   const pub = scrubDeep({
     runId: r.runId,
+    kind: r.kind ?? 'verification',
+    correctionId: r.correctionId ?? null,
+    explorationMode: r.kind === 'exploration' ? (r.explorationMode ?? 'default') : null,
     state: r.state,
     tutorial: {
       id: r.tutorial.id,
@@ -80,7 +127,11 @@ export function publicRecord(r: RunRecord) {
     cliVersion: r.cliVersion,
     durationSec: r.durationSec,
     credits: r.credits,
+    costBasis: r.costBasis ?? (r.state !== 'finished' ? null : r.credits !== null ? 'reported' : r.exitCode === null && r.progress.length === 0 ? 'not_started' : 'none'),
+    estimatedCredits: r.estimatedCredits ?? null,
     kane: r.kane,
+    assertions: (r.assertions ?? []).map((a) => ({ query: a.query, extracted: a.extracted, passed: a.passed, isCheck: a.isCheck })),
+    visitedOrigins: r.visitedOrigins ?? [],
     progress: r.progress,
     evidence: {
       found: r.evidence.found,
@@ -124,23 +175,36 @@ export class Runner extends EventEmitter {
     return this.records.get(runId) ?? (await readJson<RunRecord>(runDir(runId, 'private', 'run.json')));
   }
 
-  /** Credits that queued/active runs may still use (estimate). */
-  pendingEstimate(): number {
-    return (this.queue.length + (this.active ? 1 : 0)) * config.kane.estimatedCreditsPerRun;
+  /** Number of runs queued or running (their cost is not known yet). */
+  pendingRuns(): number {
+    return this.queue.length + (this.active ? 1 : 0);
   }
 
-  async budget(): Promise<{ limit: number; spent: number; reserved: number; available: number }> {
-    const spent = await creditsSpent();
-    const reserved = this.pendingEstimate();
-    return { limit: config.credits.hardLimit, spent, reserved, available: Math.max(0, config.credits.hardLimit - spent - reserved) };
+  /**
+   * Cost accounting for KaneVerity's own Kane runs. There is NO spending
+   * ceiling: actual (Kane-reported) and estimated costs are tracked and shown
+   * separately, and every real run still needs an explicit confirmation.
+   */
+  async costs(): Promise<CostSummary & { pendingRuns: number; estimatedByKind: Record<RunKind, [number, number]> }> {
+    return {
+      ...summarizeCosts(await creditLedger()),
+      pendingRuns: this.pendingRuns(),
+      estimatedByKind: { verification: estimateRange('verification'), exploration: estimateRange('exploration'), retest: estimateRange('retest') },
+    };
   }
 
-  async enqueue(tutorial: Tutorial, project: Project): Promise<string> {
+  async enqueue(tutorial: Tutorial, project: Project, opts: EnqueueOptions = {}): Promise<string> {
     const appStartUrl = resolveAppStart(project.appOrigin, tutorial.appStart);
-    const built = buildObjective(project.appOrigin, tutorial);
+    const kind = opts.kind ?? 'verification';
+    if (kind === 'exploration' && !opts.objective) throw new Error('Exploration runs need a KaneVerity-built objective.');
+    const built = opts.objective ?? buildObjective(project.appOrigin, tutorial);
     const runId = newRunId();
     const rec: RunRecord = {
       runId,
+      kind,
+      correctionId: opts.correctionId,
+      expectedSourceSha256: opts.expectedSourceSha256,
+      explorationMode: kind === 'exploration' ? (opts.explorationMode ?? 'default') : undefined,
       state: 'queued',
       tutorial,
       appOrigin: project.appOrigin,
@@ -330,20 +394,53 @@ export class Runner extends EventEmitter {
       };
       const credits = Number(re.credits_consumed ?? re.credits);
       rec.credits = Number.isFinite(credits) ? Math.round(credits * 100) / 100 : null;
+      rec.assertions = Object.entries(re.context?.memory ?? {})
+        .slice(0, 50)
+        .map(([key, m]) => {
+          const reasoning = String(m.reasoning ?? '');
+          const query = [m.query, m.condition, m.human_description].filter((x) => typeof x === 'string').join(' | ');
+          return {
+            key: scrub(key).slice(0, 80),
+            query: scrub(query).slice(0, 400),
+            extracted: m.extracted_value === undefined || m.extracted_value === null ? null : scrub(String(m.extracted_value)).slice(0, 200),
+            passed: /->\s*PASS\b/.test(reasoning) && !/->\s*FAIL\b/.test(reasoning),
+            isCheck: /->\s*(PASS|FAIL)\b/.test(reasoning),
+          };
+        });
     }
-    // Ledger: Kane's reported credits when available. If Kane reported none but
-    // its agent did work (progress events), record the conservative estimate.
-    // If Kane stopped before any agent work (e.g. a setup error), record 0.
-    const ledgerCredits = rec.credits ?? (stream.progress.length > 0 ? config.kane.estimatedCreditsPerRun : 0);
-    if (exitCode !== null || re) {
-      await addCredits({ runId: rec.runId, credits: ledgerCredits, at: new Date().toISOString() });
+    // Ledger: Kane's reported credits are the actual cost. If Kane reported none
+    // but its agent did work (progress events, e.g. a timeout or cancellation
+    // mid-run), record a clearly-labelled estimate. If Kane stopped before any
+    // agent work (e.g. a setup error), record 0 with basis "none".
+    const basis: CostBasis = rec.credits !== null ? 'reported' : stream.progress.length > 0 ? 'estimated' : 'none';
+    const ledgerCredits = basis === 'reported' ? rec.credits! : basis === 'estimated' ? unreportedEstimate(rec.kind ?? 'verification') : 0;
+    rec.costBasis = basis;
+    rec.estimatedCredits = basis === 'estimated' ? ledgerCredits : null;
+    if (exitCode !== null || re || stream.progress.length > 0) {
+      await addCredits({ runId: rec.runId, credits: ledgerCredits, basis, kind: rec.kind ?? 'verification', at: new Date().toISOString() });
     }
 
     // Evidence: prefer the copy Kane wrote inside this run's working directory.
     const evidence = await this.collectEvidence(rec, work, priv, stream.packPath);
 
+    // Origins seen in the evidence (detected after the run; not prevented).
+    const origins = new Set<string>();
+    for (const u of [...(evidence?.steps ?? []).map((s) => s.url), typeof re?.final_state?.url === 'string' ? (re.final_state.url as string) : null]) {
+      if (!u || u === 'about:blank') continue;
+      try {
+        const o = new URL(u);
+        origins.add(o.origin === 'null' ? o.protocol : o.origin);
+      } catch {
+        origins.add('unparseable URL');
+      }
+    }
+    rec.visitedOrigins = [...origins];
+
+    // Exploration runs are judged only on the documented OUTCOMES (did Kane
+    // independently reach them?), never as verification of the documented steps.
+    const judged = rec.kind === 'exploration' ? { ...rec.tutorial, steps: [] } : rec.tutorial;
     rec.classification = classify({
-      tutorial: rec.tutorial,
+      tutorial: judged,
       appOrigin: rec.appOrigin,
       preflight,
       spawnError,
@@ -356,6 +453,10 @@ export class Runner extends EventEmitter {
       failureMessage: evidence?.failureMessage ?? null,
     });
     rec.classification.matchingNotes = rec.classification.matchingNotes.map((n) => scrub(n));
+    if (rec.kind === 'exploration') {
+      rec.classification.documentationDefect = false;
+      rec.classification.stepResults = [];
+    }
   }
 
   /** Run Kane's documented `evidence validate <pack> --json`; only counts are kept. */

@@ -90,24 +90,38 @@ export function ReadinessStrip({ health }: { health: Health | null }) {
   );
 }
 
-export function Budget({ health }: { health: Health | null }) {
+/**
+ * KaneVerity's own Kane run costs: actual (reported by Kane) and estimated
+ * (Kane reported none) are shown separately. No limit and no account balance.
+ */
+export function CostSummary({ health }: { health: Health | null }) {
   if (!health) return null;
-  const { limit, spent, reserved, available } = health.credits;
-  const used = Math.round(spent * 100) / 100;
-  const pct = Math.min(100, Math.round(((spent + reserved) / limit) * 100));
+  const c = health.credits;
   return (
-    <div data-testid="budget">
-      <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-sm">
+    <div data-testid="cost-summary" className="text-sm">
+      <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
         <span>
-          <span className="font-semibold">{used}</span> of <span className="font-semibold">{limit}</span> KaneVerity credits used
+          <span className="font-semibold">{c.reportedCredits}</span> credits used by KaneVerity runs <span className="text-slate-500">(reported by Kane, {c.runsReported} run{c.runsReported === 1 ? '' : 's'})</span>
         </span>
-        <span className="text-slate-600">{Math.floor(available)} remaining{reserved > 0 ? ` (${reserved} reserved for queued runs)` : ''}</span>
-      </div>
-      <div className="mt-2 h-2 w-full max-w-md overflow-hidden rounded bg-slate-200" role="progressbar" aria-valuemin={0} aria-valuemax={limit} aria-valuenow={used} aria-label="KaneVerity credit budget used">
-        <div className="h-full bg-brand" style={{ width: `${pct}%` }} />
+        {c.runsEstimated > 0 && (
+          <span className="text-review">
+            + about {c.estimatedCredits} estimated for {c.runsEstimated} run{c.runsEstimated === 1 ? '' : 's'} where Kane reported no cost
+          </span>
+        )}
+        {c.runsWithoutAgentWork > 0 && <span className="text-slate-500">{c.runsWithoutAgentWork} run(s) stopped before any Kane agent work (0)</span>}
+        {c.pendingRuns > 0 && <span className="text-slate-500">{c.pendingRuns} run(s) in progress, cost not known yet</span>}
       </div>
     </div>
   );
+}
+
+/** Per-run cost, labelled by how it is known. */
+export function RunCost({ run }: { run: { state?: string; credits?: number | null; costBasis?: string | null; estimatedCredits?: number | null } }) {
+  if (run.state !== 'finished') return <span className="text-slate-500">cost not known yet</span>;
+  if (run.costBasis === 'reported' || (run.costBasis == null && run.credits != null)) return <span>{run.credits} credits (reported by Kane)</span>;
+  if (run.costBasis === 'estimated') return <span className="text-review">about {run.estimatedCredits ?? '?'} credits (estimate: Kane reported no cost)</span>;
+  if (run.costBasis === 'not_started') return <span className="text-slate-500">0 (Kane did not start)</span>;
+  return <span className="text-slate-500">0 (stopped before any Kane agent work)</span>;
 }
 
 export function ConfirmDialog({

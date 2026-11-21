@@ -22,6 +22,8 @@ function list(value: string | undefined, fallback: string[]): string[] {
     .filter(Boolean);
 }
 
+export type RunKindName = 'verification' | 'exploration' | 'retest';
+
 export interface Config {
   host: string;
   port: number;
@@ -43,9 +45,20 @@ export interface Config {
     maxSteps: number;
     graceMs: number;
     testedVersion: string;
-    estimatedCreditsPerRun: number;
+    /**
+     * Estimated cost range per run kind, shown before a run is confirmed.
+     * Estimates only (from observed runs on this demo), never limits. The upper
+     * bound also labels the estimate recorded when Kane reports no cost for a
+     * run that did agent work. Actual Kane-reported costs are recorded separately.
+     */
+    estimatedCreditsByKind: Record<RunKindName, [number, number]>;
   };
-  credits: { hardLimit: number };
+  /**
+   * D1: the only folder corrections may write to (the local demo docs source).
+   * Files are addressed by their docs source reference, e.g. "tutorials/x.md".
+   */
+  docsContentDir: string;
+  claude: { exe: string | null; maxBudgetUsd: number; timeoutMs: number };
   discovery: { maxPages: number; maxBytes: number; timeoutMs: number };
 }
 
@@ -58,6 +71,18 @@ export function resolveKaneEntry(): string | null {
     path.join('/usr/local/lib/node_modules', rel),
     path.join('/usr/lib/node_modules', rel),
     process.env.HOME ? path.join(process.env.HOME, '.npm-global', 'lib', 'node_modules', rel) : undefined,
+  ];
+  for (const c of candidates) if (c && existsSync(c)) return c;
+  return null;
+}
+
+/** Locate the Claude Code executable so it can be started directly (no shell). */
+export function resolveClaudeExe(): string | null {
+  const candidates = [
+    process.env.KANEVERITY_CLAUDE_EXE,
+    process.env.APPDATA ? path.join(process.env.APPDATA, 'npm', 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe') : undefined,
+    path.join('/usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude'),
+    path.join('/usr/lib/node_modules/@anthropic-ai/claude-code/bin/claude'),
   ];
   for (const c of candidates) if (c && existsSync(c)) return c;
   return null;
@@ -77,8 +102,24 @@ export const config: Config = {
     maxSteps: 30,
     graceMs: 60_000,
     testedVersion: '0.10.5',
-    estimatedCreditsPerRun: 35,
+    estimatedCreditsByKind: {
+      verification: [12, 35],
+      retest: [12, 35],
+      // More agent actions (store heading, find the route, assert every outcome).
+      exploration: [20, 40],
+    },
   },
-  credits: { hardLimit: Number(process.env.KANEVERITY_CREDIT_LIMIT) || 100 },
+  docsContentDir: process.env.KANEVERITY_DOCS_CONTENT_DIR || path.join(REPO_ROOT, 'apps', 'docs', 'content'),
+  claude: { exe: resolveClaudeExe(), maxBudgetUsd: 1, timeoutMs: 180_000 },
   discovery: { maxPages: 50, maxBytes: 1_000_000, timeoutMs: 10_000 },
 };
+
+/** Estimated credit range for a run kind (an estimate, never a limit). */
+export function estimateRange(kind: RunKindName = 'verification'): [number, number] {
+  return config.kane.estimatedCreditsByKind[kind] ?? config.kane.estimatedCreditsByKind.verification;
+}
+
+/** Estimate recorded when Kane reports no cost for a run that did agent work (upper bound of its kind). */
+export function unreportedEstimate(kind: RunKindName = 'verification'): number {
+  return estimateRange(kind)[1];
+}

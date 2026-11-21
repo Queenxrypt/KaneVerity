@@ -37,10 +37,39 @@ export async function readJson<T>(file: string): Promise<T | null> {
   }
 }
 
+/**
+ * How a run's cost is known:
+ *  - reported:  Kane CLI reported credits_consumed in run_end (actual cost)
+ *  - estimated: Kane reported no cost but its agent did work; the amount is a
+ *               KaneVerity estimate, never presented as an actual cost
+ *  - none:      Kane stopped before any agent work (e.g. a setup error); 0
+ */
+export type CostBasis = 'reported' | 'estimated' | 'none';
+
 export interface CreditEntry {
   runId: string;
   credits: number;
+  /** Older entries (before basis was recorded) have no basis and are treated as reported. */
+  basis?: CostBasis;
+  kind?: string;
   at: string;
+  note?: string;
+}
+
+export interface CostSummary {
+  /** Sum of credits Kane actually reported. */
+  reportedCredits: number;
+  /** Sum of KaneVerity estimates for runs where Kane reported no cost. */
+  estimatedCredits: number;
+  runsReported: number;
+  runsEstimated: number;
+  runsWithoutAgentWork: number;
+}
+
+export function basisOf(e: CreditEntry): CostBasis {
+  if (e.basis) return e.basis;
+  // Legacy entry: 0 with a correction note means Kane did no agent work.
+  return e.credits === 0 ? 'none' : 'reported';
 }
 
 export async function creditLedger(): Promise<CreditEntry[]> {
@@ -53,8 +82,22 @@ export async function addCredits(entry: CreditEntry): Promise<void> {
   await writeJson(dataPath('credits.json'), ledger);
 }
 
-export async function creditsSpent(): Promise<number> {
-  return (await creditLedger()).reduce((sum, e) => sum + (Number.isFinite(e.credits) ? e.credits : 0), 0);
+export function summarizeCosts(ledger: CreditEntry[]): CostSummary {
+  const s: CostSummary = { reportedCredits: 0, estimatedCredits: 0, runsReported: 0, runsEstimated: 0, runsWithoutAgentWork: 0 };
+  for (const e of ledger) {
+    const c = Number.isFinite(e.credits) ? e.credits : 0;
+    const b = basisOf(e);
+    if (b === 'reported') {
+      s.reportedCredits += c;
+      s.runsReported++;
+    } else if (b === 'estimated') {
+      s.estimatedCredits += c;
+      s.runsEstimated++;
+    } else s.runsWithoutAgentWork++;
+  }
+  s.reportedCredits = Math.round(s.reportedCredits * 100) / 100;
+  s.estimatedCredits = Math.round(s.estimatedCredits * 100) / 100;
+  return s;
 }
 
 export function newRunId(now = new Date()): string {

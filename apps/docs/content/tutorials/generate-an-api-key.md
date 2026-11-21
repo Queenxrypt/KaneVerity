@@ -15,9 +15,9 @@ API keys let your own scripts and services work with AcmeDesk. This tutorial sho
 
 ## Steps
 
-1. On the **Dashboard**, click **Settings**.
-2. Click **API**.
-3. Click **Create API Key**.
+1. In the left navigation menu, click **Developer Settings**.
+2. Click **API Keys**.
+3. Click **Generate Key**.
 
 ## Expected outcome
 

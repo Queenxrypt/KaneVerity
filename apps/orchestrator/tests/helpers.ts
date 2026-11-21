@@ -1,4 +1,6 @@
 import { readFileSync } from 'node:fs';
+import { cp, mkdtemp, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { crc32, deflateRawSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
@@ -7,6 +9,20 @@ import type { RunEnd } from '../src/kane/ndjson.ts';
 import type { EvidenceStep } from '../src/kane/evidence.ts';
 
 export const TESTS_DIR = path.dirname(fileURLToPath(import.meta.url));
+
+// The API-key tutorial as it was before any correction (fixed fixture). Tests must
+// not depend on the live docs content, which an approved correction may change.
+export const OUTDATED_API_KEY_DOC_FILE = path.join(TESTS_DIR, 'fixtures', 'generate-an-api-key.outdated.md');
+export const OUTDATED_API_KEY_DOC = readFileSync(OUTDATED_API_KEY_DOC_FILE, 'utf8');
+const LIVE_DOCS_CONTENT_DIR = path.resolve(TESTS_DIR, '..', '..', 'docs', 'content');
+
+/** A temporary copy of the docs content with the API-key tutorial reset to the outdated fixture. */
+export async function outdatedDocsContent(): Promise<string> {
+  const dir = path.join(await mkdtemp(path.join(os.tmpdir(), 'kv-docs-')), 'content');
+  await cp(LIVE_DOCS_CONTENT_DIR, dir, { recursive: true });
+  await writeFile(path.join(dir, 'tutorials', 'generate-an-api-key.md'), OUTDATED_API_KEY_DOC, 'utf8');
+  return dir;
+}
 
 export interface Fixture {
   name: string;

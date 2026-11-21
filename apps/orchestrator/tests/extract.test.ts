@@ -6,13 +6,14 @@ import { createDocsServer } from '../../docs/server.ts';
 import { discover } from '../src/discovery/crawl.ts';
 import { extractPage } from '../src/discovery/extract.ts';
 import type { Tutorial } from '../src/types.ts';
+import { outdatedDocsContent } from './helpers.ts';
 
 const APP = 'http://127.0.0.1:5174';
 let server: Server;
 let base: string;
 
 before(async () => {
-  server = createDocsServer();
+  server = createDocsServer(await outdatedDocsContent());
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });

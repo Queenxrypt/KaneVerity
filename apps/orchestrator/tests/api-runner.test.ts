@@ -1,7 +1,7 @@
 // End-to-end orchestrator test with a FAKE Kane CLI (no credits are used).
 // Covers API security, the MVP origin allow-list, discovery, queueing, Kane
 // invocation (no shell), evidence handling, classification, redaction,
-// screenshot policy and the credit limit.
+// screenshot policy and per-run cost accounting.
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -12,7 +12,7 @@ import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createDocsServer } from '../../docs/server.ts';
-import { makeZip, TESTS_DIR, TINY_JPEG } from './helpers.ts';
+import { makeZip, outdatedDocsContent, TESTS_DIR, TINY_JPEG } from './helpers.ts';
 
 let docs: Server;
 let app: Server;
@@ -28,7 +28,7 @@ let appUp = true;
 const listen = (s: Server) => new Promise<string>((r) => s.listen(0, '127.0.0.1', () => r(`http://127.0.0.1:${(s.address() as AddressInfo).port}`)));
 
 before(async () => {
-  docs = createDocsServer();
+  docs = createDocsServer(await outdatedDocsContent());
   docsUrl = (await listen(docs)) + '/';
   app = createServer((_req, res) => {
     if (!appUp) {
@@ -66,7 +66,6 @@ before(async () => {
     KANE_CLI_ENTRY: path.join(TESTS_DIR, 'fake-kane.cjs'),
     KANEVERITY_ALLOWED_DOCS_ORIGINS: new URL(docsUrl).origin,
     KANEVERITY_ALLOWED_APP_ORIGINS: appOrigin,
-    KANEVERITY_CREDIT_LIMIT: '100',
     FAKE_KANE_FIXTURE: path.join(TESTS_DIR, 'fixtures', 'acmedesk-apikey-outdated.json'),
     FAKE_KANE_PACK: pack,
     FAKE_KANE_ARGS_OUT: argsOut,
@@ -142,13 +141,14 @@ test('MVP scope: only the allow-listed local demo origins can be connected', asy
   assert.equal((await post('/api/project', { docsUrl: '', appUrl })).status, 400);
 });
 
-test('health reports Kane login via exit code only (identity never returned) and the credit budget', async () => {
+test('health reports Kane login via exit code only (identity never returned) and run costs, with no limit or balance', async () => {
   const h = await j(await fetch(api + '/api/health'));
   assert.equal(h.kane.loggedIn, true);
   assert.equal('balance' in h.kane, false, 'the TestMu account balance is never sent to the UI');
   assert.ok(!JSON.stringify(h).includes('999'));
-  assert.deepEqual(Object.keys(h.credits).sort(), ['available', 'limit', 'reserved', 'spent']);
-  assert.equal(h.credits.limit, 100);
+  assert.deepEqual(Object.keys(h.credits).sort(), ['estimatedByKind', 'estimatedCredits', 'pendingRuns', 'reportedCredits', 'runsEstimated', 'runsReported', 'runsWithoutAgentWork']);
+  assert.deepEqual(h.credits.estimatedByKind, { verification: [12, 35], exploration: [20, 40], retest: [12, 35] });
+  for (const k of ['limit', 'available', 'remaining', 'balance']) assert.equal(k in h.credits, false, `no "${k}" field`);
   assert.deepEqual(findLeaks(h), []);
   assert.ok(!JSON.stringify(h).includes('someone@'));
 });
@@ -230,12 +230,30 @@ test('full flow: connect, discover, run outdated API-key tutorial -> FAILED at s
   const ledger = JSON.parse(await readFile(path.join(dataDir, 'credits.json'), 'utf8'));
   assert.equal(ledger.length, 1);
   assert.ok(ledger[0].credits > 0 && ledger[0].credits < 35);
+  assert.equal(ledger[0].basis, 'reported', 'actual Kane-reported cost');
+  assert.equal(ledger[0].kind, 'verification');
+  assert.equal(run.costBasis, 'reported');
+  assert.equal(run.credits, ledger[0].credits);
+  assert.equal(run.estimatedCredits, null);
 });
 
-test('credit limit: requests that could exceed the 100-credit limit are refused before Kane starts', async () => {
+test('no arbitrary ceiling: a multi-tutorial request that would previously exceed 100 credits is accepted, and each run records its own reported cost', async () => {
+  const before = (await ledgerNow()).length;
   const r = await post('/api/runs', { tutorialIds: ['create-a-project', 'invite-a-team-member', 'configure-workspace-settings'] });
-  assert.equal(r.status, 409);
-  assert.match((await j(r)).error, /Credit limit/);
+  assert.equal(r.status, 202, 'no 409 credit-limit refusal');
+  const body = await j(r);
+  assert.equal(body.runIds.length, 3);
+  assert.deepEqual(body.estimatedCreditsPerRun, [12, 35], 'verification estimate');
+  for (const id of body.runIds) {
+    const run = await waitFinished(id);
+    assert.equal(run.costBasis, 'reported');
+    assert.ok(run.credits > 0);
+  }
+  const ledger = await ledgerNow();
+  assert.equal(ledger.length, before + 3);
+  const h = await j(await fetch(api + '/api/health'));
+  assert.equal(h.credits.runsReported, ledger.filter((e) => (e as { basis?: string }).basis === 'reported').length);
+  assert.equal(h.credits.pendingRuns, 0);
 });
 
 test('a run whose evidence shows a visit outside the app is NEEDS_REVIEW, not a documentation defect', async () => {
@@ -264,6 +282,30 @@ test('a run whose evidence shows a visit outside the app is NEEDS_REVIEW, not a 
   }
 });
 
+test('incomplete run (agent worked, then timed out with no reported cost) -> BLOCKED and a labelled ESTIMATE, never an actual cost', async () => {
+  const before = (await ledgerNow()).length;
+  const fx = path.join(dataDir, 'timeout.json');
+  await writeFile(fx, JSON.stringify({ exitCode: 3, cliVersion: '0.10.5', progress: [{ step: 2, status: 'running', remark: 'Step 1' }], runEnd: null }));
+  const prev = process.env.FAKE_KANE_FIXTURE;
+  process.env.FAKE_KANE_FIXTURE = fx;
+  try {
+    const { runIds } = await j(await post('/api/runs', { tutorialIds: ['generate-an-api-key'] }));
+    const run = await waitFinished(runIds[0]);
+    assert.equal(run.classification.status, 'BLOCKED');
+    assert.equal(run.credits, null, 'no actual cost invented');
+    assert.equal(run.costBasis, 'estimated');
+    assert.equal(run.estimatedCredits, 35);
+    const ledger = await ledgerNow();
+    assert.equal(ledger.length, before + 1);
+    assert.equal((ledger[ledger.length - 1] as { basis?: string }).basis, 'estimated');
+    const h = await j(await fetch(api + '/api/health'));
+    assert.ok(h.credits.runsEstimated >= 1);
+    assert.ok(h.credits.estimatedCredits >= 35);
+  } finally {
+    process.env.FAKE_KANE_FIXTURE = prev;
+  }
+});
+
 test('Kane setup error (exit 2, no agent work) -> BLOCKED and 0 credits recorded', async () => {
   const before = (await ledgerNow()).length;
   const fx = path.join(dataDir, 'setup-error.json');
@@ -278,6 +320,8 @@ test('Kane setup error (exit 2, no agent work) -> BLOCKED and 0 credits recorded
     const ledger = await ledgerNow();
     assert.equal(ledger.length, before + 1);
     assert.equal(ledger[ledger.length - 1].credits, 0);
+    assert.equal((ledger[ledger.length - 1] as { basis?: string }).basis, 'none', 'setup error: no agent work, not an estimate');
+    assert.equal(run.costBasis, 'none');
   } finally {
     process.env.FAKE_KANE_FIXTURE = prev;
   }

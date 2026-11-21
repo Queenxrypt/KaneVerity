@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../api.ts';
-import { Budget, Card, ConfirmDialog, ErrorNote, latestByTutorial, SourceRef, StatusBadge } from '../components/ui.tsx';
+import { Card, ConfirmDialog, CostSummary, ErrorNote, latestByTutorial, SourceRef, StatusBadge } from '../components/ui.tsx';
 import { useHealth } from '../health.tsx';
 import type { Discovery, PublicRun, Tutorial } from '../types.ts';
 
@@ -166,9 +166,7 @@ export function Tutorials() {
 
   const latest = latestByTutorial(runs);
   const ready = !!health && health.appReachable && health.docsReachable && health.kane.loggedIn;
-  const perRun = 35;
-  const needed = selected.length * perRun;
-  const available = health ? Math.floor(health.credits.available) : 0;
+  const [lo, hi] = health?.credits.estimatedByKind.verification ?? [12, 35];
 
   return (
     <div className="space-y-5">
@@ -248,10 +246,9 @@ export function Tutorials() {
       >
         <p>Kane runs each tutorial in a real browser against the application, one at a time (about 3 minutes each).</p>
         <p>
-          Typical cost is about 12-35 credits per tutorial. Up to <strong>{needed}</strong> credits are reserved for this request.
+          Estimated cost: about <strong>{lo}-{hi} credits per tutorial</strong>, so roughly {selected.length * lo}-{selected.length * hi} credits in total. This is an estimate; the actual cost Kane reports is recorded for each run.
         </p>
-        <Budget health={health} />
-        {needed > available && <p className="font-medium text-fail">This exceeds the remaining KaneVerity budget, so the orchestrator will refuse it.</p>}
+        <CostSummary health={health} />
       </ConfirmDialog>
     </div>
   );

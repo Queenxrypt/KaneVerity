@@ -22,7 +22,10 @@ Kane CLI runs the documented journey (real Chrome) → status + evidence pack
 FAILED (genuine doc mismatch) → Claude Code proposes a correction (diff)
       │
       ▼
-Human approves → docs updated → Kane retests → VERIFIED only on passing evidence
+Human approves & applies → docs updated
+      │
+      ▼
+Human starts Kane retest (separate confirmation) → VERIFIED only on passing evidence
 ```
 
 ## Demo setup
@@ -59,7 +62,7 @@ The orchestrator runs Kane CLI and Claude Code as local processes, so the full w
 | AcmeDesk Docs | ✅ Built (`apps/docs`) |
 | Orchestrator: discovery, extraction, Kane runner, evidence, classification (4a) | ✅ Built (`apps/orchestrator`) |
 | KaneVerity interface (4b) | ✅ Built (`apps/web`) |
-| Claude correction and retest | ⏳ Not started |
+| Claude correction loop (exploration, review, independent retest) | ✅ Built, real run pending (`apps/orchestrator/src/correct`) |
 | KaneVerity UI | ⏳ Not started |
 
 ## Prerequisites
@@ -140,18 +143,30 @@ npm run test:orchestrator   # unit, security and fake-Kane end-to-end tests (no 
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/health` | Docs and app reachability, Kane installed and logged in (exit code only), credit budget |
+| `GET /api/health` | Docs and app reachability, Kane installed and logged in (exit code only), KaneVerity run costs (Kane-reported vs estimated) |
 | `POST /api/project` | Connect a docs URL and an app URL |
 | `POST /api/discover` | Discover tutorials (sitemap and links, same origin only) |
 | `POST /api/runs` | Queue Kane runs for tutorial ids |
 | `GET /api/runs/:id` | UI-safe run record. `/events` streams it live, `/screens/<n>.jpg` serves approved screenshots, `/cancel` cancels |
 
-- **MVP scope:** live verification runs **only** against the controlled local AcmeDesk demo (`127.0.0.1:5174`) and its docs (`127.0.0.1:5175`). Arbitrary third-party documentation is **not** supported for live execution yet. Kane's instructions and the post-run URL check are safeguards, not a hard browser-domain restriction.
+- **MVP scope:** live verification runs **only** against the controlled local AcmeDesk demo (`127.0.0.1:5174`) and its docs (`127.0.0.1:5175`). Arbitrary third-party documentation is **not** supported for live execution yet. Kane's instructions ask it to stay on the app, and every origin seen in the evidence is checked **after** the run. External navigation is **detected, not prevented**: Kane CLI offers no browser-domain restriction. Any unexpected origin makes a verification NEEDS REVIEW and rejects an exploration or retest.
 - **Kane receives the documentation as written:** a fixed KaneVerity rules header, then the extracted steps word for word, then one `Assert that:` line per documented expected outcome. Kane is started as `node <kane-cli.cjs> run …`, with no shell.
 - **Classification** follows [`docs/VERIFICATION_RULES.md`](docs/VERIFICATION_RULES.md). PASSED needs a passing Kane assertion matched to every documented outcome. FAILED needs a failure traced to exactly one documented step or outcome. Anything less certain is NEEDS REVIEW, and external problems are BLOCKED.
 - **Privacy:** raw Kane output, stderr and evidence packs stay in `data/runs/<id>/private/` (git-ignored, never served). The UI gets an allow-listed, scrubbed record, and a screenshot is shown only if its step was on the demo app origin.
-- **Credits:** one Kane run at a time, with a hard limit (default 100) tracked in `data/credits.json`. Requests that could exceed it are refused before Kane starts.
+- **Credits:** one Kane run at a time, and every real run needs an explicit confirmation showing its estimated cost (about 12–35 credits for a verification or retest, 20–40 for an exploration; estimates only, from observed runs). There is no internal spending ceiling. Each run records its cost in `data/credits.json`: the actual cost Kane reports, a clearly labelled estimate if Kane reported none after doing agent work (for example a timeout), or 0 if Kane stopped before any agent work.
 - **API protection:** loopback only, a Host-header check, and every mutating request needs `X-KaneVerity: 1`, a JSON body and an allowed Origin. No CORS headers are sent.
+
+## Correction loop: Claude review and independent Kane retest
+
+A FAILED run with a confirmed documentation defect can start a correction (Run page, **Propose correction**):
+
+1. **Claude reviews** a sanitized package in an isolated temporary folder: the tutorial, the failed step, Kane's evidence and approved screenshots. Claude Code runs headless with `--tools Read --restricted --strict-mcp-config --disable-slash-commands --no-session-persistence`, so it has read-only access to that folder only, with no shell, web, MCP, skills or project files. It answers `needs_exploration`, `proposal` or `cannot_determine`.
+2. **Kane explores** (on request, with credit confirmation) using a fixed KaneVerity template: it finds how the documented task is done today and must independently prove every documented outcome. Exploration never counts as verification. You choose an allow-listed **exploration mode**: the standard template, or **"Explore using the main navigation menu"**, which adds one fixed, label-free rule to use the main navigation menu instead of dashboard shortcuts. The mode is recorded on the run, in the audit trail and in Claude's package.
+3. **Gate:** a correction can only be proposed once exploration has confirmed the route. Every UI label in the proposal must be the target of a specific exploration action (or a stored or asserted exploration value), cited by run and step, in the order Kane performed them. Only the Steps list may change, never the expected outcomes.
+4. **You review** the diff, rationale and evidence citations, then reject or choose **Approve & apply**. Approving only writes the Markdown (fingerprint-guarded, original and backup kept in `data/corrections/`) and records one `applied` audit event. It does not start Kane or spend credits; the correction waits in the **applied** state.
+5. **Start Kane retest** is a separate action with its own credit confirmation, available only for an applied correction. Kane retests the tutorial as re-extracted from the live docs page. **VERIFIED** requires all of: the approved document's fingerprint, a clean start, exit 0 and `run_end` passed, every outcome matched to a distinct passing assertion, a valid finalized evidence pack, and no unexpected origin (these rules are unchanged by the split). Otherwise the correction stays open. Claude's answer never decides it.
+
+**Restore original** puts the tutorial back for repeat demos. Full rules: [`docs/VERIFICATION_RULES.md`](docs/VERIFICATION_RULES.md).
 
 ## KaneVerity interface
 
@@ -164,7 +179,7 @@ npm run dev:orchestrator    # terminal 3: API on :4000 (start it from a normal t
 npm run dev:web             # terminal 4: UI on :5173
 ```
 
-- **Dashboard:** connected project, readiness (docs, app, Kane logged in), the **KaneVerity credit budget** (limit, used, remaining), status counts, the latest finding and recent runs. The TestMu account balance and identity are never shown.
+- **Dashboard:** connected project, readiness (docs, app, Kane logged in), **KaneVerity run costs** (credits Kane reported, plus any labelled estimates; no limit and no account balance), status counts, the latest finding and recent runs. The TestMu account balance and identity are never shown.
 - **Connect:** docs and app URLs. Live verification is limited to the local AcmeDesk demo.
 - **Tutorials:** discovered tutorials with extracted steps, expected outcomes and source lines. Select tutorials, then confirm the credit reservation, and Kane runs one at a time.
 - **Run:** live progress (Server-Sent Events, falling back to polling; `?transport=poll` forces polling), the status with a plain-language explanation, documented steps and outcomes with source references and matched Kane checks, approved screenshots, evidence validation status, and the exact instructions sent to Kane. Evidence pack paths are never shown, only a run reference.

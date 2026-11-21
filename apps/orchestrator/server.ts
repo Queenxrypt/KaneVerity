@@ -13,9 +13,12 @@ import { readFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { config } from './src/config.ts';
+import { config, estimateRange } from './src/config.ts';
 import { discover } from './src/discovery/crawl.ts';
 import { Runner, publicRecord } from './src/kane/runner.ts';
+import { CorrectionError, CorrectionService, publicCorrection } from './src/correct/service.ts';
+import { CORRECTION_ID_PATTERN } from './src/correct/store.ts';
+import { EXPLORATION_MODES } from './src/correct/explore.ts';
 import { dataPath, readJson, RUN_ID_PATTERN, runDir, writeJson } from './src/store.ts';
 import type { Discovery, Project } from './src/types.ts';
 import { isAllowedOrigin, originOf, UrlError } from './src/urls.ts';
@@ -77,7 +80,7 @@ function kaneCommand(entry: string, cmd: string): Promise<{ code: number | null;
 }
 
 // The TestMu account balance and identity are never sent to the UI. The UI shows
-// only the KaneVerity credit budget (limit / used / remaining) from the ledger.
+// only KaneVerity's own run costs from the ledger (Kane-reported vs estimated).
 let kaneStatusCache: { at: number; value: { installed: boolean; loggedIn: boolean } } | null = null;
 async function kaneStatus() {
   if (kaneStatusCache && Date.now() - kaneStatusCache.at < 60_000) return kaneStatusCache.value;
@@ -122,7 +125,7 @@ function checkUrlPair(docsUrl: unknown, appUrl: unknown): Project {
   return { docsUrl: docsUrl.trim(), docsOrigin, appUrl: appUrl.trim(), appOrigin, savedAt: new Date().toISOString() };
 }
 
-export function createOrchestrator(runner = new Runner()): Server {
+export function createOrchestrator(runner = new Runner(), corrections = new CorrectionService(runner)): Server {
   return createServer(async (req, res) => {
     try {
       const host = (req.headers.host ?? '').toLowerCase();
@@ -142,19 +145,21 @@ export function createOrchestrator(runner = new Runner()): Server {
 
       if (method === 'GET' && p === '/api/health') {
         const project = await readJson<Project>(dataPath('project.json'));
-        const [docsOk, appOk, kane, budget] = await Promise.all([
+        const [docsOk, appOk, kane, costs] = await Promise.all([
           project ? reachable(project.docsUrl) : Promise.resolve(false),
           project ? reachable(project.appUrl) : Promise.resolve(false),
           kaneStatus(),
-          runner.budget(),
+          runner.costs(),
         ]);
         return json(res, 200, {
           project,
           docsReachable: docsOk,
           appReachable: appOk,
           kane,
-          credits: budget,
+          credits: costs,
           liveVerificationScope: { docs: config.allowedDocsOrigins, app: config.allowedAppOrigins, note: 'Live verification is limited to the controlled local AcmeDesk demo.' },
+          // Allow-listed exploration modes with the exact fixed rule each adds (no app labels).
+          explorationModes: Object.entries(EXPLORATION_MODES).map(([id, m]) => ({ id, label: m.label, rule: m.rule })),
         });
       }
 
@@ -192,11 +197,6 @@ export function createOrchestrator(runner = new Runner()): Server {
         if (tutorials.some((t) => !t)) throw new HttpError(404, 'Unknown tutorial id.');
         const notRunnable = tutorials.find((t) => t!.notRunnable);
         if (notRunnable) throw new HttpError(422, `"${notRunnable.title}" cannot be verified: ${notRunnable.notRunnable}`);
-        const budget = await runner.budget();
-        const needed = tutorials.length * config.kane.estimatedCreditsPerRun;
-        if (needed > budget.available) {
-          throw new HttpError(409, `Credit limit: ${tutorials.length} run(s) may need up to ${needed} credits, but only ${budget.available} of the ${budget.limit}-credit limit remain.`);
-        }
         const runIds: string[] = [];
         for (const t of tutorials) {
           try {
@@ -205,7 +205,8 @@ export function createOrchestrator(runner = new Runner()): Server {
             throw new HttpError(422, (err as Error).message);
           }
         }
-        return json(res, 202, { runIds, estimatedCredits: needed });
+        // No spending ceiling. The UI shows the typical cost and asks for confirmation before calling this.
+        return json(res, 202, { runIds, estimatedCreditsPerRun: estimateRange('verification') });
       }
 
       if (method === 'GET' && p === '/api/runs') {
@@ -220,7 +221,7 @@ export function createOrchestrator(runner = new Runner()): Server {
         return json(res, 200, list);
       }
 
-      const runMatch = /^\/api\/runs\/([^/]+)(?:\/(events|cancel|screens\/([^/]+)))?$/.exec(p);
+      const runMatch = /^\/api\/runs\/([^/]+)(?:\/(events|cancel|corrections|screens\/([^/]+)))?$/.exec(p);
       if (runMatch) {
         const runId = runMatch[1];
         if (!RUN_ID_PATTERN.test(runId)) throw new HttpError(404, 'Run not found.');
@@ -232,6 +233,12 @@ export function createOrchestrator(runner = new Runner()): Server {
           const rec = await runner.load(runId);
           if (!rec) throw new HttpError(404, 'Run not found.');
           return json(res, 200, publicRecord(rec));
+        }
+
+        if (method === 'POST' && sub === 'corrections') {
+          await readBody(req);
+          const rec = await corrections.start(runId);
+          return json(res, 202, publicCorrection(rec));
         }
 
         if (method === 'POST' && sub === 'cancel') {
@@ -278,9 +285,29 @@ export function createOrchestrator(runner = new Runner()): Server {
         }
       }
 
+      if (method === 'GET' && p === '/api/corrections') {
+        return json(res, 200, (await corrections.list()).map(publicCorrection));
+      }
+      const cMatch = /^\/api\/corrections\/([^/]+)(?:\/(analyze|explore|approve|retest|reject|restore))?$/.exec(p);
+      if (cMatch) {
+        const id = cMatch[1];
+        if (!CORRECTION_ID_PATTERN.test(id)) throw new HttpError(404, 'Correction not found.');
+        const action = cMatch[2];
+        if (method === 'GET' && !action) return json(res, 200, publicCorrection(await corrections.get(id)));
+        if (method === 'POST' && action) {
+          const body = (await readBody(req)) as Record<string, unknown> | null;
+          if (action === 'analyze') return json(res, 202, publicCorrection(await corrections.analyze(id)));
+          // Exploration mode: only allow-listed ids are accepted (validated in the service); default if omitted.
+          const mode = body && typeof body === 'object' && 'mode' in body ? body.mode : 'default';
+          const rec =
+            action === 'explore' ? await corrections.explore(id, mode) : action === 'approve' ? await corrections.approve(id) : action === 'retest' ? await corrections.retest(id) : action === 'reject' ? await corrections.reject(id) : await corrections.restore(id);
+          return json(res, 202, publicCorrection(rec));
+        }
+      }
+
       throw new HttpError(404, 'Not found.');
     } catch (err) {
-      if (err instanceof HttpError) return json(res, err.status, { error: err.message });
+      if (err instanceof HttpError || err instanceof CorrectionError) return json(res, err.status, { error: err.message });
       console.error('[orchestrator] request failed:', (err as Error).message);
       return json(res, 500, { error: 'Internal error.' });
     }
@@ -309,6 +336,6 @@ if (isMain) {
   });
   server.listen(config.port, config.host, () => {
     console.log(`[orchestrator] KaneVerity orchestrator on http://${config.host}:${config.port}/`);
-    console.log(`[orchestrator] Kane CLI: ${config.kane.entry ? 'found' : 'NOT FOUND'}; credit limit ${config.credits.hardLimit}`);
+    console.log(`[orchestrator] Kane CLI: ${config.kane.entry ? 'found' : 'NOT FOUND'}`);
   });
 }

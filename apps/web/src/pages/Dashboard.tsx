@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api.ts';
-import { Budget, Card, ErrorNote, formatTime, latestByTutorial, ReadinessStrip, StatusBadge } from '../components/ui.tsx';
+import { Card, CostSummary, ErrorNote, formatTime, latestByTutorial, ReadinessStrip, RunCost, StatusBadge } from '../components/ui.tsx';
 import { useHealth } from '../health.tsx';
 import type { Discovery, PublicRun, VerificationStatus } from '../types.ts';
 
@@ -46,7 +46,7 @@ export function Dashboard() {
         )}
         <div className="mt-4 space-y-4">
           <ReadinessStrip health={health} />
-          <Budget health={health} />
+          <CostSummary health={health} />
         </div>
       </Card>
 
@@ -104,7 +104,7 @@ export function Dashboard() {
                       <StatusBadge run={r} />
                     </td>
                     <td className="py-2 pr-4 text-slate-600">{formatTime(r.startedAt ?? r.createdAt)}</td>
-                    <td className="py-2 pr-4 text-slate-600">{r.credits ?? '–'}</td>
+                    <td className="py-2 pr-4 text-slate-600"><RunCost run={r} /></td>
                     <td className="py-2">
                       <Link to={`/runs/${r.runId}`} className="font-mono text-xs text-brand hover:underline">
                         {r.runId}
