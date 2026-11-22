@@ -20,6 +20,9 @@ import { CorrectionError, CorrectionService, publicCorrection } from './src/corr
 import { CORRECTION_ID_PATTERN } from './src/correct/store.ts';
 import { EXPLORATION_MODES } from './src/correct/explore.ts';
 import { AssuranceError, RequirementsService } from './src/assurance/service.ts';
+import { AssuranceJobs, publicJob } from './src/assurance/jobs.ts';
+import { JOB_KINDS } from './src/assurance/commands.ts';
+import { isTutorialId } from './src/assurance/store.ts';
 import { dataPath, readJson, RUN_ID_PATTERN, runDir, writeJson } from './src/store.ts';
 import type { Discovery, Project } from './src/types.ts';
 import { isAllowedOrigin, originOf, UrlError } from './src/urls.ts';
@@ -126,7 +129,7 @@ function checkUrlPair(docsUrl: unknown, appUrl: unknown): Project {
   return { docsUrl: docsUrl.trim(), docsOrigin, appUrl: appUrl.trim(), appOrigin, savedAt: new Date().toISOString() };
 }
 
-export function createOrchestrator(runner = new Runner(), corrections = new CorrectionService(runner), requirements = new RequirementsService()): Server {
+export function createOrchestrator(runner = new Runner(), corrections = new CorrectionService(runner), requirements = new RequirementsService(), jobs = new AssuranceJobs({ requirements })): Server {
   return createServer(async (req, res) => {
     try {
       const host = (req.headers.host ?? '').toLowerCase();
@@ -319,6 +322,36 @@ export function createOrchestrator(runner = new Runner(), corrections = new Corr
         }
       }
 
+      // Assurance B2: Kane Assurance jobs (off unless KANEVERITY_ASSURANCE_MODE enables them).
+      if (method === 'GET' && p === '/api/assurance/status') {
+        return json(res, 200, {
+          mode: config.assurance.mode,
+          pinnedVersion: config.assurance.pinnedVersion,
+          kaneFound: !!config.kane.entry,
+          kinds: Object.values(JOB_KINDS).map((k) => ({ kind: k.kind, label: k.label, paid: k.paid, enabled: config.assurance.mode === 'all' || (config.assurance.mode === 'free' && !k.paid) })),
+        });
+      }
+      if (p === '/api/assurance/jobs') {
+        if (method === 'GET') {
+          const t = url.searchParams.get('tutorialId');
+          if (t !== null && !isTutorialId(t)) throw new HttpError(400, 'Invalid tutorial id.');
+          return json(res, 200, (await jobs.list(t)).map((j) => publicJob(j)));
+        }
+        if (method === 'POST') {
+          const body = (await readBody(req)) as Record<string, unknown>;
+          return json(res, 202, publicJob(await jobs.start(body ?? {})));
+        }
+      }
+      const jMatch = /^\/api\/assurance\/jobs\/([^/]+)(?:\/(answer|cancel))?$/.exec(p);
+      if (jMatch) {
+        const [, jobId, jAction] = jMatch;
+        if (method === 'GET' && !jAction) return json(res, 200, publicJob(await jobs.get(jobId)));
+        if (method === 'POST' && jAction) {
+          const body = await readBody(req);
+          return json(res, 202, publicJob(jAction === 'answer' ? await jobs.answer(jobId, body) : await jobs.cancel(jobId)));
+        }
+      }
+
       // Assurance B1: requirements artefacts (generation is local and free; no Kane command runs).
       if (method === 'GET' && p === '/api/assurance/requirements') {
         return json(res, 200, await requirements.list());
@@ -362,7 +395,10 @@ const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPat
 if (isMain) {
   const runner = new Runner();
   trackRuns(runner);
-  const server = createOrchestrator(runner);
+  const jobs = new AssuranceJobs();
+  // A job that was running when the orchestrator stopped is marked interrupted (never retried).
+  await jobs.init();
+  const server = createOrchestrator(runner, undefined, undefined, jobs);
   server.on('error', (err: NodeJS.ErrnoException) => {
     console.error(err.code === 'EADDRINUSE' ? `[orchestrator] Port ${config.port} is already in use.` : `[orchestrator] ${err.message}`);
     process.exit(1);

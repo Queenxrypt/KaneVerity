@@ -151,6 +151,9 @@ npm run test:orchestrator   # unit, security and fake-Kane end-to-end tests (no 
 | `GET /api/assurance/requirements` | Requirements state per discovered tutorial (`none`, `current` or `stale`) |
 | `GET /api/assurance/requirements/:tutorialId` | One tutorial's requirements: state and reasons, the latest (or `?version=n`) document with its line map, every version, and a preview of what would be generated |
 | `POST /api/assurance/requirements/:tutorialId` | Generate requirements from the current documentation; a new version only if the content changed. Local and free: no Kane command runs |
+| `GET /api/assurance/status` | Whether Kane Assurance commands are switched on (`off` by default), the pinned Kane version, and which job kinds are enabled |
+| `GET/POST /api/assurance/jobs` | List jobs (`?tutorialId=`) or start an allow-listed job (`ingest`, `extract`, `design`, `list`, `cover`); paid kinds need `{"confirm": {"paid": true}}` |
+| `GET /api/assurance/jobs/:id`, `POST …/answer`, `POST …/cancel` | One job; answer a paused session's questions (validated against what Kane asked); stop, cancel or abandon |
 
 - **MVP scope:** live verification runs **only** against the controlled local AcmeDesk demo (`127.0.0.1:5174`) and its docs (`127.0.0.1:5175`). Arbitrary third-party documentation is **not** supported for live execution yet. Kane's instructions ask it to stay on the app, and every origin seen in the evidence is checked **after** the run. External navigation is **detected, not prevented**: Kane CLI offers no browser-domain restriction. Any unexpected origin makes a verification NEEDS REVIEW and rejects an exploration or retest.
 - **Kane receives the documentation as written:** a fixed KaneVerity rules header, then the extracted steps word for word, then one `Assert that:` line per documented expected outcome. Kane is started as `node <kane-cli.cjs> run …`, with no shell.
@@ -164,6 +167,17 @@ npm run test:orchestrator   # unit, security and fake-Kane end-to-end tests (no 
 KaneVerity is adopting Kane CLI's Assurance lifecycle (requirements → use cases → reviewed test design → execution → coverage → reconcile) as its primary verification engine. The approved architecture and phases are in [`docs/ASSURANCE_PLAN.md`](docs/ASSURANCE_PLAN.md); Kane CLI is pinned to 0.10.5.
 
 **B1 (done): requirements.** Each discovered tutorial gets a deterministic requirements document (Tutorials → **Verification material**): the documented steps and expected outcomes in order, exact labels and values, each item's documentation `file:line`, and the document fingerprint. The application address appears only as `{{app_url}}`. Versions are append-only under `data/assurance/requirements/<tutorialId>/` and become **stale** when the documentation changes. Generating runs no Kane command and uses no credits; later phases (ingest, use cases, design, execution) each need explicit approval.
+
+**B2 (built, switched off): the Assurance job runner.** KaneVerity can run allow-listed Kane Assurance commands (land requirements, extract use cases, design tests, list, coverage) and answer Kane's questions when a session pauses. Safeguards:
+
+- **Off by default.** `KANEVERITY_ASSURANCE_MODE` is `off` unless set to `free` (only commands that use no credits) or `all`. Every paid command also needs an explicit confirmation.
+- **One Kane process at a time**, shared with verification runs (Kane's Assurance store is single-writer), and only one store-writing job per tutorial.
+- **Pinned version:** each orchestrator process checks `kane-cli --version` is 0.10.5 before the first job.
+- **No shell, no terminal:** Kane runs directly in `data/assurance/workspace/` with `KANE_CONTEXT_GITIGNORE=0`. Only fixed argument lists, validated ids and your validated answers reach Kane; Kane's suggested `next` commands are shown, never run.
+- **Stream rules** from Kane's documented contract: unknown events tolerated, a missing final `done` means the outcome is unknown, and `done` must agree with the exit code.
+- **Cost:** Kane-reported usage, or the balance difference measured around the job, or **unknown** (never shown as 0).
+- **Recovery:** timeouts and cancels stop the process; a job running when the orchestrator stopped is marked interrupted and never retried. Expired sessions can't be answered.
+- **Privacy:** raw Kane output stays in `data/assurance/jobs/<id>/private/`; the UI gets a scrubbed, leak-checked view.
 
 ## Correction loop: Claude review and independent Kane retest
 

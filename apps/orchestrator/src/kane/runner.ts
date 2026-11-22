@@ -22,6 +22,7 @@ import { findLeaks, scrub, scrubDeep } from '../verify/redact.ts';
 import { readEvidence, type EvidenceStep } from './evidence.ts';
 import { applyLine, emptyStream, type ParsedStream } from './ndjson.ts';
 import { buildObjective } from './objective.ts';
+import { kaneLock } from './lock.ts';
 
 const MAX_LOG_BYTES = 2 * 1024 * 1024;
 const MAX_PUBLIC_SCREENSHOT_BYTES = 3 * 1024 * 1024;
@@ -262,12 +263,15 @@ export class Runner extends EventEmitter {
     const runId = this.queue.shift()!;
     const rec = this.records.get(runId)!;
     this.active = { runId, child: null, cancelled: false };
+    // One Kane process at a time across runs and Assurance jobs (shared lock).
+    const release = await kaneLock.acquire(`run:${runId}`);
     try {
       await this.execute(rec);
     } catch (err) {
       rec.warnings.push(`Internal error: ${scrub((err as Error).message)}`);
       rec.classification ??= classify({ tutorial: rec.tutorial, appOrigin: rec.appOrigin, preflight: { ok: true }, spawnError: 'internal error', exitCode: null, runEnd: null, progress: [], evidenceSteps: [] });
     } finally {
+      release();
       rec.state = 'finished';
       rec.finishedAt ??= new Date().toISOString();
       await this.persist(rec);

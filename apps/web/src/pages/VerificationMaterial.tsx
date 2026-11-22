@@ -7,6 +7,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api, ApiError, ORCHESTRATOR_DOWN } from '../api.ts';
 import { Card, ErrorNote, formatTime } from '../components/ui.tsx';
+import { AssuranceJobsPanel } from '../components/AssuranceJobs.tsx';
 import { useHealth } from '../health.tsx';
 import { lineDiff } from '../../../orchestrator/src/assurance/lineDiff.ts';
 import type { LineMapEntry, RequirementsDetail, RequirementsState } from '../types.ts';
@@ -335,6 +336,8 @@ export function VerificationMaterial() {
           <ErrorNote message={error} />
         </div>
       </Card>
+
+      <AssuranceJobsPanel tutorialId={d.tutorialId} requirementsState={d.state} requirementsSha={latest?.reqSha256 ?? null} />
 
       {d.preview && (
         <Card title={latest ? `What regenerating would change (version ${latest.version + 1})` : 'Preview of version 1'}>

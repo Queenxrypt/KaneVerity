@@ -24,6 +24,18 @@ function list(value: string | undefined, fallback: string[]): string[] {
 
 export type RunKindName = 'verification' | 'exploration' | 'retest';
 
+/**
+ * Kane Assurance commands (B2+). Off by default: nothing starts Kane Assurance
+ * until the validation runs are approved and this is switched on explicitly.
+ *   off  - no Assurance command runs at all
+ *   free - only commands that use no credits (land files, list, cover)
+ *   all  - every allow-listed command, each still needing an explicit confirmation
+ */
+export type AssuranceMode = 'off' | 'free' | 'all';
+function assuranceMode(v: string | undefined): AssuranceMode {
+  return v === 'free' || v === 'all' ? v : 'off';
+}
+
 export interface Config {
   host: string;
   port: number;
@@ -60,6 +72,17 @@ export interface Config {
   docsContentDir: string;
   claude: { exe: string | null; maxBudgetUsd: number; timeoutMs: number };
   discovery: { maxPages: number; maxBytes: number; timeoutMs: number };
+  assurance: {
+    mode: AssuranceMode;
+    /** Kane CLI version every Assurance job checks before running (B1-B6 pin). */
+    pinnedVersion: string;
+    /** Folder holding the local Assurance store (.context/) and .testmuai/. */
+    workspaceDir: string;
+    /** A job still running after this long is stopped. */
+    timeoutMs: number;
+    /** Longest free-text answer to a Kane question. */
+    maxAnswerLength: number;
+  };
 }
 
 /** Locate Kane CLI's JS entry so it can be run with `node` directly (no shell). */
@@ -112,6 +135,13 @@ export const config: Config = {
   docsContentDir: process.env.KANEVERITY_DOCS_CONTENT_DIR || path.join(REPO_ROOT, 'apps', 'docs', 'content'),
   claude: { exe: resolveClaudeExe(), maxBudgetUsd: 1, timeoutMs: 180_000 },
   discovery: { maxPages: 50, maxBytes: 1_000_000, timeoutMs: 10_000 },
+  assurance: {
+    mode: assuranceMode(process.env.KANEVERITY_ASSURANCE_MODE),
+    pinnedVersion: '0.10.5',
+    workspaceDir: path.join(process.env.KANEVERITY_DATA_DIR || path.join(REPO_ROOT, 'data'), 'assurance', 'workspace'),
+    timeoutMs: Number(process.env.KANEVERITY_ASSURANCE_TIMEOUT_MS) || 30 * 60_000,
+    maxAnswerLength: 500,
+  },
 };
 
 /** Estimated credit range for a run kind (an estimate, never a limit). */

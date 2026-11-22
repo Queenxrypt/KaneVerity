@@ -176,3 +176,16 @@ test('B1 never starts Kane or Claude, and starts no runs', async () => {
   assert.equal(existsSync(path.join(work, 'claude-args.json')), false, 'no Claude process was started');
   assert.deepEqual(await j(await get('/api/runs')), []);
 });
+
+test('B2 default: Kane Assurance commands are switched off; nothing can start', async () => {
+  const st = await j(await get('/api/assurance/status'));
+  assert.equal(st.mode, 'off');
+  assert.ok(st.kinds.every((k: { enabled: boolean }) => !k.enabled));
+  for (const body of [{ kind: 'ingest', tutorialId: 'generate-an-api-key' }, { kind: 'extract', tutorialId: 'generate-an-api-key', confirm: { paid: true } }, { kind: 'cover' }]) {
+    const r = await post('/api/assurance/jobs', body);
+    assert.equal(r.status, 403, JSON.stringify(body));
+    assert.match((await j(r)).error, /switched off/);
+  }
+  assert.deepEqual(await j(await get('/api/assurance/jobs')), []);
+  assert.equal(existsSync(path.join(work, 'kane-args.json')), false, 'no Kane process was started');
+});

@@ -77,10 +77,13 @@ export async function readJson<T>(file: string): Promise<T | null> {
     try {
       return JSON.parse(await readFile(file, 'utf8')) as T;
     } catch (err) {
-      // A file caught mid-overwrite (see writeAtomic) is re-read briefly; a missing
-      // or genuinely invalid file still reads as null.
-      if (err instanceof SyntaxError && attempt < 5) {
-        await sleep(20);
+      // A file caught mid-overwrite (see writeAtomic), or briefly locked by that
+      // in-place copy on Windows (EBUSY/EPERM/EACCES), is re-read briefly. A missing
+      // file (ENOENT) or one that stays invalid still reads as null.
+      const code = (err as NodeJS.ErrnoException).code ?? '';
+      const transient = err instanceof SyntaxError || RENAME_RETRY_CODES.has(code);
+      if (transient && attempt < 10) {
+        await sleep(20 * attempt);
         continue;
       }
       return null;
@@ -94,8 +97,12 @@ export async function readJson<T>(file: string): Promise<T | null> {
  *  - estimated: Kane reported no cost but its agent did work; the amount is a
  *               KaneVerity estimate, never presented as an actual cost
  *  - none:      Kane stopped before any agent work (e.g. a setup error); 0
+ *  - measured:  Kane reported no cost, but the account balance was read before and
+ *               after (one Kane process at a time), so the difference is the cost
+ *  - unknown:   agent work may have happened, but neither a reported cost nor a
+ *               balance difference is available; never presented as free
  */
-export type CostBasis = 'reported' | 'estimated' | 'none';
+export type CostBasis = 'reported' | 'estimated' | 'none' | 'measured' | 'unknown';
 
 export interface CreditEntry {
   runId: string;
@@ -115,6 +122,11 @@ export interface CostSummary {
   runsReported: number;
   runsEstimated: number;
   runsWithoutAgentWork: number;
+  /** Sum of costs measured from the balance before and after a job. */
+  measuredCredits: number;
+  runsMeasured: number;
+  /** Jobs whose cost could not be determined (shown, never counted as 0). */
+  runsUnknownCost: number;
 }
 
 export function basisOf(e: CreditEntry): CostBasis {
@@ -134,7 +146,7 @@ export async function addCredits(entry: CreditEntry): Promise<void> {
 }
 
 export function summarizeCosts(ledger: CreditEntry[]): CostSummary {
-  const s: CostSummary = { reportedCredits: 0, estimatedCredits: 0, runsReported: 0, runsEstimated: 0, runsWithoutAgentWork: 0 };
+  const s: CostSummary = { reportedCredits: 0, estimatedCredits: 0, runsReported: 0, runsEstimated: 0, runsWithoutAgentWork: 0, measuredCredits: 0, runsMeasured: 0, runsUnknownCost: 0 };
   for (const e of ledger) {
     const c = Number.isFinite(e.credits) ? e.credits : 0;
     const b = basisOf(e);
@@ -144,10 +156,16 @@ export function summarizeCosts(ledger: CreditEntry[]): CostSummary {
     } else if (b === 'estimated') {
       s.estimatedCredits += c;
       s.runsEstimated++;
+    } else if (b === 'measured') {
+      s.measuredCredits += c;
+      s.runsMeasured++;
+    } else if (b === 'unknown') {
+      s.runsUnknownCost++;
     } else s.runsWithoutAgentWork++;
   }
   s.reportedCredits = Math.round(s.reportedCredits * 100) / 100;
   s.estimatedCredits = Math.round(s.estimatedCredits * 100) / 100;
+  s.measuredCredits = Math.round(s.measuredCredits * 100) / 100;
   return s;
 }
 

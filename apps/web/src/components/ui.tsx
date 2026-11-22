@@ -122,6 +122,16 @@ export function CostSummary({ health }: { health: Health | null }) {
             {c.runsWithoutAgentWork} run{c.runsWithoutAgentWork === 1 ? '' : 's'} stopped before Kane did any agent work (0 credits)
           </span>
         )}
+        {c.runsMeasured > 0 && (
+          <span>
+            + <span className="font-semibold">{c.measuredCredits}</span> measured from the balance for {c.runsMeasured} Assurance job{c.runsMeasured === 1 ? '' : 's'}
+          </span>
+        )}
+        {c.runsUnknownCost > 0 && (
+          <span className="text-review">
+            {c.runsUnknownCost} job{c.runsUnknownCost === 1 ? '' : 's'} with an unknown cost (Kane reported none and the balance could not be compared)
+          </span>
+        )}
         {c.pendingRuns > 0 && <span className="text-slate-500">{c.pendingRuns} run{c.pendingRuns === 1 ? '' : 's'} in progress, cost not known yet</span>}
       </div>
     </div>

@@ -74,6 +74,54 @@ export interface RequirementsDetail {
   preview: { markdown: string; reqSha256: string; docSha256: string; lineMap: LineMapEntry[] } | null;
 }
 
+/** Assurance B2: Kane Assurance jobs (UI-safe view). */
+export type AssuranceMode = 'off' | 'free' | 'all';
+export type JobKind = 'ingest' | 'extract' | 'design' | 'resume' | 'list' | 'cover';
+export type JobState = 'queued' | 'running' | 'complete' | 'paused' | 'answered' | 'refused' | 'error' | 'crashed' | 'interrupted' | 'cancelled' | 'abandoned' | 'expired';
+
+export interface AssuranceStatus {
+  mode: AssuranceMode;
+  pinnedVersion: string;
+  kaneFound: boolean;
+  kinds: { kind: JobKind; label: string; paid: boolean; enabled: boolean }[];
+}
+
+export interface JobQuestion {
+  id: string;
+  text: string;
+  risk: string | null;
+  rationale: string | null;
+  options: { label: string; detail: string | null; input: boolean }[];
+  recommendedIndex: number | null;
+  allowFreeText: boolean;
+}
+
+export interface PublicJob {
+  jobId: string;
+  kind: JobKind;
+  label: string;
+  paid: boolean;
+  tutorialId: string | null;
+  state: JobState;
+  reason: string;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  exitCode: number | null;
+  cliVersion: string | null;
+  doneStatus: string | null;
+  next: string[];
+  params: Record<string, unknown>;
+  pause: { expiresAt: string | null; questions: JobQuestion[]; crashed: boolean; held: number | null } | null;
+  parentJobId: string | null;
+  resumedBy: string | null;
+  requirements: { version: number; reqSha256: string; docSha256: string } | null;
+  credits: { amount: number | null; basis: 'reported' | 'measured' | 'unknown' | 'estimated' | 'none' | null; reportedTotal: number | null; measured: number | null };
+  summary: { ingested: { sourceId: string; status: string }[]; commits: { counts: Record<string, number>; minted: string[] }[]; warnings: string[]; errors: string[]; held: number; messages: string[]; unknownEventTypes: string[]; nonJsonLines: number; invalidLines: number };
+}
+
+export type JobAnswer = number | string | { option: number; text: string };
+
 /** Is a discovered tutorial still what the live docs page shows? */
 export interface TutorialFreshness {
   id: string;
@@ -101,6 +149,9 @@ export interface Health {
     runsReported: number;
     runsEstimated: number;
     runsWithoutAgentWork: number;
+    measuredCredits: number;
+    runsMeasured: number;
+    runsUnknownCost: number;
     pendingRuns: number;
     /** Estimated range per run kind, shown before a run. Estimates only, never limits. */
     estimatedByKind: Record<'verification' | 'exploration' | 'retest', [number, number]>;

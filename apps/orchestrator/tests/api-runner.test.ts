@@ -146,7 +146,8 @@ test('health reports Kane login via exit code only (identity never returned) and
   assert.equal(h.kane.loggedIn, true);
   assert.equal('balance' in h.kane, false, 'the TestMu account balance is never sent to the UI');
   assert.ok(!JSON.stringify(h).includes('999'));
-  assert.deepEqual(Object.keys(h.credits).sort(), ['estimatedByKind', 'estimatedCredits', 'pendingRuns', 'reportedCredits', 'runsEstimated', 'runsReported', 'runsWithoutAgentWork']);
+  // Exact allow-list. measuredCredits is a sum of balance *differences* (B2), never the balance itself.
+  assert.deepEqual(Object.keys(h.credits).sort(), ['estimatedByKind', 'estimatedCredits', 'measuredCredits', 'pendingRuns', 'reportedCredits', 'runsEstimated', 'runsMeasured', 'runsReported', 'runsUnknownCost', 'runsWithoutAgentWork']);
   assert.deepEqual(h.credits.estimatedByKind, { verification: [12, 35], exploration: [20, 40], retest: [12, 35] });
   for (const k of ['limit', 'available', 'remaining', 'balance']) assert.equal(k in h.credits, false, `no "${k}" field`);
   assert.deepEqual(findLeaks(h), []);

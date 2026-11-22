@@ -10,7 +10,7 @@ test('legacy ledger entries (no basis) keep their meaning: >0 reported, 0 = no a
     { runId: 'r3', credits: 21.39, at: '' },
   ];
   assert.deepEqual(legacy.map(basisOf), ['none', 'reported', 'reported']);
-  assert.deepEqual(summarizeCosts(legacy), { reportedCredits: 33.11, estimatedCredits: 0, runsReported: 2, runsEstimated: 0, runsWithoutAgentWork: 1 });
+  assert.deepEqual(summarizeCosts(legacy), { reportedCredits: 33.11, estimatedCredits: 0, runsReported: 2, runsEstimated: 0, runsWithoutAgentWork: 1, measuredCredits: 0, runsMeasured: 0, runsUnknownCost: 0 });
 });
 
 test('reported and estimated costs are summed separately, never mixed', () => {
