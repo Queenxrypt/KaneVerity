@@ -26,6 +26,7 @@ export type CorrectionState =
   | 'verified' // retest met every VERIFIED requirement
   | 'not_verified' // retest did not meet them: the issue stays open
   | 'restored' // the original document was restored
+  | 'closed' // closed by the user after an error; nothing was written
   | 'error';
 
 export interface Citation {
@@ -94,6 +95,8 @@ export interface CorrectionRecord {
   approvedAt: string | null;
   appliedAt: string | null;
   retestRunId: string | null;
+  /** Every retest run started for this correction, oldest first (a retest may be tried again from not_verified). */
+  retestRuns?: string[];
   verification: { verified: boolean; checks: VerificationCheck[] } | null;
   restoredAt: string | null;
   log: { at: string; event: string; detail: string }[];

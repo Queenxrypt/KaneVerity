@@ -4,6 +4,7 @@
 
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { fetchText } from '../discovery/crawl.ts';
+import { refreshDiscovery } from '../discovery/freshness.ts';
 import { extractPage } from '../discovery/extract.ts';
 import type { Runner, RunRecord } from '../kane/runner.ts';
 import { readJson, dataPath } from '../store.ts';
@@ -25,7 +26,16 @@ export class CorrectionError extends Error {
   }
 }
 
-const OPEN: CorrectionState[] = ['analyzing', 'needs_exploration', 'exploring', 'route_confirmed', 'route_uncertain', 'cannot_determine', 'proposal_rejected', 'proposed', 'retesting', 'not_verified'];
+/**
+ * States in which a correction is still in progress for its tutorial: no second
+ * correction may start. 'applied' (written, retest not started) and 'error'
+ * (recoverable) are open too; only rejected, closed, restored and verified are not.
+ */
+export const OPEN_STATES: readonly CorrectionState[] = ['analyzing', 'needs_exploration', 'exploring', 'route_confirmed', 'route_uncertain', 'cannot_determine', 'proposal_rejected', 'proposed', 'applied', 'retesting', 'not_verified', 'error'];
+const OPEN = OPEN_STATES;
+
+/** The exact confirmation required to restore (and so invalidate) a VERIFIED correction. */
+export const CONFIRM_INVALIDATE_VERIFIED = 'invalidate-verified';
 
 /** UI-safe view: allow-listed fields, scrubbed, leak-checked. */
 export function publicCorrection(r: CorrectionRecord) {
@@ -59,6 +69,7 @@ export function publicCorrection(r: CorrectionRecord) {
     approvedAt: r.approvedAt,
     appliedAt: r.appliedAt,
     retestRunId: r.retestRunId,
+    retestRuns: r.retestRuns ?? (r.retestRunId ? [r.retestRunId] : []),
     verification: r.verification,
     restoredAt: r.restoredAt,
     log: r.log,
@@ -166,7 +177,7 @@ export class CorrectionService {
   async analyze(id: string): Promise<CorrectionRecord> {
     if (this.busy.has(id)) throw new CorrectionError(409, 'Claude is already reviewing this correction.');
     const rec = await this.get(id);
-    if (!['route_confirmed', 'proposal_rejected', 'cannot_determine', 'needs_exploration'].includes(rec.state)) {
+    if (!['route_confirmed', 'proposal_rejected', 'cannot_determine', 'needs_exploration', 'error'].includes(rec.state)) {
       throw new CorrectionError(409, `Claude can't be asked in state "${rec.state}".`);
     }
     this.busy.add(id);
@@ -246,7 +257,7 @@ export class CorrectionService {
   async explore(id: string, mode: unknown = 'default'): Promise<CorrectionRecord> {
     if (!isExplorationMode(mode)) throw new CorrectionError(400, `Unknown exploration mode. Allowed: ${Object.keys(EXPLORATION_MODES).join(', ')}.`);
     const rec = await this.get(id);
-    if (!['needs_exploration', 'route_uncertain', 'route_confirmed', 'proposal_rejected', 'cannot_determine'].includes(rec.state)) throw new CorrectionError(409, `Exploration is not available in state "${rec.state}".`);
+    if (!['needs_exploration', 'route_uncertain', 'route_confirmed', 'proposal_rejected', 'cannot_determine', 'error'].includes(rec.state)) throw new CorrectionError(409, `Exploration is not available in state "${rec.state}".`);
     const original = await this.runner.load(rec.runId);
     if (!original) throw new CorrectionError(404, 'Original run not found.');
     const project = await this.project();
@@ -289,6 +300,7 @@ export class CorrectionService {
     // One audit event per application: the state change records what was written.
     this.set(rec, 'applied', `Wrote ${rec.file} (fingerprint ${rec.proposal.proposedSha256.slice(0, 12)}). A Kane retest has not been started.`);
     await saveCorrection(rec);
+    await this.refreshAfterWrite(rec);
     return rec;
   }
 
@@ -296,7 +308,9 @@ export class CorrectionService {
   async retest(id: string): Promise<CorrectionRecord> {
     if (this.busy.has(id)) throw new CorrectionError(409, 'A retest is already being started for this correction.');
     const rec = await this.get(id);
-    if (rec.state !== 'applied' || !rec.proposal || !rec.appliedAt) throw new CorrectionError(409, 'Only an applied correction can be retested.');
+    // From 'not_verified' a retest may be tried again (for example after a blocked run);
+    // the live page must still show exactly the approved document.
+    if (!['applied', 'not_verified'].includes(rec.state) || !rec.proposal || !rec.appliedAt || rec.restoredAt) throw new CorrectionError(409, 'Only an applied correction can be retested.');
     this.busy.add(id);
     try {
       return await this.startRetest(rec, rec.proposal);
@@ -329,6 +343,8 @@ export class CorrectionService {
       return rec;
     }
     const runId = await this.runner.enqueue(live, project, { kind: 'retest', correctionId: rec.id, expectedSourceSha256: proposal.proposedSha256 });
+    // Keep every retest (older records only have retestRunId), then point at the new one.
+    rec.retestRuns = [...(rec.retestRuns ?? (rec.retestRunId ? [rec.retestRunId] : [])), runId];
     rec.retestRunId = runId;
     this.set(rec, 'retesting', 'Kane is retesting the corrected tutorial independently.');
     await saveCorrection(rec);
@@ -336,10 +352,16 @@ export class CorrectionService {
   }
 
   /** Put the original document back (only if the file is exactly the applied proposal). */
-  async restore(id: string): Promise<CorrectionRecord> {
+  async restore(id: string, body: unknown = null): Promise<CorrectionRecord> {
     const rec = await this.get(id);
     if (!rec.appliedAt || !rec.proposal) throw new CorrectionError(409, 'Nothing was applied, so there is nothing to restore.');
+    if (rec.restoredAt || rec.state === 'restored') throw new CorrectionError(409, 'The original document was already restored.');
     if (rec.state === 'retesting') throw new CorrectionError(409, 'Wait for the retest to finish.');
+    const wasVerified = rec.state === 'verified';
+    const confirm = body && typeof body === 'object' && 'confirm' in body ? (body as { confirm: unknown }).confirm : null;
+    if (wasVerified && confirm !== CONFIRM_INVALIDATE_VERIFIED) {
+      throw new CorrectionError(409, `This correction is VERIFIED. Restoring the original document puts the outdated tutorial back and invalidates that VERIFIED result. Confirm explicitly to continue.`);
+    }
     const original = await readFile(correctionPath(rec.id, 'original.md'), 'utf8');
     if (sha256(original) !== rec.originalSha256) throw new CorrectionError(409, 'The stored original does not match its fingerprint.');
     try {
@@ -348,9 +370,37 @@ export class CorrectionService {
       throw new CorrectionError(409, (err as Error).message);
     }
     rec.restoredAt = new Date().toISOString();
-    this.set(rec, 'restored', 'The original document was restored.');
+    this.set(rec, 'restored', wasVerified
+      ? 'The original document was restored. The earlier VERIFIED result no longer applies: the live tutorial is the original version again.'
+      : 'The original document was restored.');
+    await saveCorrection(rec);
+    await this.refreshAfterWrite(rec);
+    return rec;
+  }
+
+  /** Close a correction that stopped with an error. Nothing was written to the documentation. */
+  async dismiss(id: string): Promise<CorrectionRecord> {
+    const rec = await this.get(id);
+    if (rec.state !== 'error') throw new CorrectionError(409, 'Only a correction that stopped with an error can be closed.');
+    if (rec.appliedAt && !rec.restoredAt) throw new CorrectionError(409, 'A correction is applied; restore the original first.');
+    this.set(rec, 'closed', 'Closed after an error. The documentation was not changed.');
     await saveCorrection(rec);
     return rec;
+  }
+
+  /**
+   * After the documentation file changes (apply or restore), refresh discovery so
+   * verification runs use the live content. A failure is recorded, never hidden:
+   * the stale-discovery guard still refuses runs until discovery is refreshed.
+   */
+  private async refreshAfterWrite(rec: CorrectionRecord): Promise<void> {
+    try {
+      const project = await this.project();
+      await refreshDiscovery(project);
+    } catch (err) {
+      logEvent(rec, 'discovery_refresh_failed', `Discovery could not be refreshed: ${scrub((err as Error).message)}. Use Discover again before verifying.`);
+      await saveCorrection(rec);
+    }
   }
 
   /** React to finished exploration/retest runs. */

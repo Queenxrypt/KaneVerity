@@ -114,6 +114,7 @@ export function publicRecord(r: RunRecord) {
       title: r.tutorial.title,
       url: r.tutorial.url,
       method: r.tutorial.method,
+      sourceSha256: r.tutorial.sourceSha256 ?? null,
       steps: r.tutorial.steps,
       outcomes: r.tutorial.outcomes,
     },

@@ -20,7 +20,7 @@ function Diff({ diff }: { diff: string }) {
   );
 }
 
-type Pending = null | { action: 'analyze' | 'explore' | 'approve' | 'retest' | 'reject' | 'restore'; title: string; body: string; kane: false | 'exploration' | 'retest' };
+type Pending = null | { action: 'analyze' | 'explore' | 'approve' | 'retest' | 'reject' | 'restore' | 'dismiss'; title: string; body: string; kane: false | 'exploration' | 'retest'; ack?: string };
 
 export function CorrectionDetail() {
   const { id = '' } = useParams();
@@ -30,6 +30,7 @@ export function CorrectionDetail() {
   const [notFound, setNotFound] = useState(false);
   const [pending, setPending] = useState<Pending>(null);
   const [busy, setBusy] = useState(false);
+  const [acked, setAcked] = useState(false);
   const [exploreMode, setExploreMode] = useState('default');
   const modes = health?.explorationModes ?? [];
   const modeLabel = (id: string) => modes.find((m) => m.id === id)?.label ?? id;
@@ -57,13 +58,15 @@ export function CorrectionDetail() {
     setBusy(true);
     setError(null);
     try {
-      setC(await api.correctionAction(id, p.action, p.action === 'explore' ? { mode: exploreMode } : {}));
+      const body = p.action === 'explore' ? { mode: exploreMode } : p.action === 'restore' && p.ack ? { confirm: 'invalidate-verified' } : {};
+      setC(await api.correctionAction(id, p.action, body));
       await refresh();
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setBusy(false);
       setPending(null);
+      setAcked(false);
     }
   }
 
@@ -95,12 +98,12 @@ export function CorrectionDetail() {
         </p>
         {ACTIVE.has(s) && <p className="mt-2 text-xs text-slate-500">Updating automatically…</p>}
         <div className="mt-4 flex flex-wrap gap-2">
-          {(s === 'needs_exploration' || s === 'route_uncertain' || s === 'route_confirmed' || s === 'proposal_rejected' || s === 'cannot_determine') && (
+          {(s === 'needs_exploration' || s === 'route_uncertain' || s === 'route_confirmed' || s === 'proposal_rejected' || s === 'cannot_determine' || s === 'error') && (
             <button type="button" className="rounded-md bg-brand px-3 py-2 text-sm font-semibold text-white disabled:opacity-50" disabled={busy} onClick={() => setPending({ action: 'explore', title: 'Run a Kane exploration?', body: 'Kane explores the application from the Dashboard to find how this documented task is done today, then checks every documented outcome. Exploration never counts as verification.', kane: 'exploration' })}>
               Run Kane exploration
             </button>
           )}
-          {(s === 'route_confirmed' || s === 'proposal_rejected' || s === 'needs_exploration' || s === 'cannot_determine') && c.attempts.length > 0 && (
+          {(s === 'route_confirmed' || s === 'proposal_rejected' || s === 'needs_exploration' || s === 'cannot_determine' || s === 'error') && (c.attempts.length > 0 || s === 'error') && (
             <button type="button" className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium disabled:opacity-50" disabled={busy} onClick={() => setPending({ action: 'analyze', title: 'Ask Claude again?', body: 'Claude reviews the finding again with any new exploration evidence. It reads only the sanitized package and cannot change anything.', kane: false })}>
               Ask Claude again
             </button>
@@ -115,13 +118,51 @@ export function CorrectionDetail() {
               </button>
             </>
           )}
-          {s === 'applied' && (
-            <button type="button" className="rounded-md bg-brand px-3 py-2 text-sm font-semibold text-white disabled:opacity-50" disabled={busy} onClick={() => setPending({ action: 'retest', title: 'Start the Kane retest?', body: 'Kane retests the corrected tutorial independently from the live docs page. Only that retest can mark it VERIFIED.', kane: 'retest' })}>
-              Start Kane retest
+          {(s === 'applied' || s === 'not_verified') && !c.restoredAt && (
+            <button
+              type="button"
+              className="rounded-md bg-brand px-3 py-2 text-sm font-semibold text-white disabled:opacity-50"
+              disabled={busy}
+              onClick={() =>
+                setPending(
+                  s === 'applied'
+                    ? { action: 'retest', title: 'Start the Kane retest?', body: 'Kane retests the corrected tutorial independently from the live docs page. Only that retest can mark it VERIFIED.', kane: 'retest' }
+                    : { action: 'retest', title: 'Retest again?', body: 'The last retest did not meet every VERIFIED requirement. Kane retests the same corrected tutorial again, independently, from the live docs page. Earlier retests stay in the history.', kane: 'retest' },
+                )
+              }
+            >
+              {s === 'applied' ? 'Start Kane retest' : 'Retest again'}
+            </button>
+          )}
+          {s === 'error' && (
+            <button
+              type="button"
+              className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium disabled:opacity-50"
+              disabled={busy}
+              onClick={() => setPending({ action: 'dismiss', title: 'Close this correction?', body: 'Closes the correction after the error. Nothing was written to the documentation, and its history is kept. A new correction can then be started from a FAILED run.', kane: false })}
+            >
+              Close correction
             </button>
           )}
           {c.appliedAt && !c.restoredAt && s !== 'retesting' && (
-            <button type="button" className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium disabled:opacity-50" disabled={busy} onClick={() => setPending({ action: 'restore', title: 'Restore the original tutorial?', body: 'Puts the original document back (only if the file is exactly the applied correction).', kane: false })}>
+            <button
+              type="button"
+              className={`rounded-md border bg-white px-3 py-2 text-sm font-medium disabled:opacity-50 ${s === 'verified' ? 'border-fail/40 text-fail' : 'border-slate-300'}`}
+              disabled={busy}
+              onClick={() =>
+                setPending(
+                  s === 'verified'
+                    ? {
+                        action: 'restore',
+                        title: 'Restore the original and invalidate VERIFIED?',
+                        body: 'This correction is VERIFIED. Restoring puts the original, outdated tutorial back on the live docs site. The VERIFIED result then no longer applies, and the tutorial shows its original FAILED result again. The correction history and all evidence are kept.',
+                        kane: false,
+                        ack: 'I understand this invalidates the VERIFIED result.',
+                      }
+                    : { action: 'restore', title: 'Restore the original tutorial?', body: 'Puts the original document back (only if the file is exactly the applied correction).', kane: false },
+                )
+              }
+            >
               Restore original
             </button>
           )}
@@ -169,6 +210,12 @@ export function CorrectionDetail() {
             </li>
           )}
           {c.verification && <li className={c.verification.verified ? 'font-semibold text-pass' : 'font-semibold text-fail'}>{c.verification.verified ? 'VERIFIED by Kane retest' : 'Not verified: the issue stays open'}</li>}
+          {c.restoredAt && (
+            <li className="font-semibold text-slate-700" data-testid="restored-note">
+              Original restored · {formatTime(c.restoredAt)}
+              {c.verification?.verified ? ' (the VERIFIED result no longer applies)' : ''}
+            </li>
+          )}
           {c.restoredAt && <li>Original restored · {formatTime(c.restoredAt)}</li>}
         </ol>
       </Card>
@@ -268,7 +315,7 @@ export function CorrectionDetail() {
       )}
 
       {c.verification && (
-        <Card title={c.verification.verified ? 'Retest: VERIFIED' : 'Retest: not verified'}>
+        <Card title={c.verification.verified ? (c.restoredAt ? 'Retest: VERIFIED (no longer current: original restored)' : 'Retest: VERIFIED') : 'Retest: not verified'}>
           <ul className="space-y-1 text-sm" data-testid="verification-checks">
             {c.verification.checks.map((ch) => (
               <li key={ch.name} className="flex gap-2">
@@ -296,8 +343,25 @@ export function CorrectionDetail() {
         </ul>
       </Collapsible>
 
-      <ConfirmDialog open={!!pending} title={pending?.title ?? ''} confirmLabel="Confirm" busy={busy} onCancel={() => setPending(null)} onConfirm={() => pending && void run(pending)}>
+      <ConfirmDialog
+        open={!!pending}
+        title={pending?.title ?? ''}
+        confirmLabel="Confirm"
+        busy={busy}
+        confirmDisabled={!!pending?.ack && !acked}
+        onCancel={() => {
+          setPending(null);
+          setAcked(false);
+        }}
+        onConfirm={() => pending && (!pending.ack || acked) && void run(pending)}
+      >
         <p>{pending?.body}</p>
+        {pending?.ack && (
+          <label className="flex items-start gap-2 rounded-md border border-fail/30 bg-fail-soft p-3 text-sm" data-testid="restore-ack">
+            <input type="checkbox" checked={acked} onChange={(e) => setAcked(e.target.checked)} className="mt-0.5" />
+            <span>{pending.ack}</span>
+          </label>
+        )}
         {pending?.action === 'explore' && (
           <fieldset className="rounded-md border border-slate-200 p-3" data-testid="exploration-mode">
             <legend className="px-1 text-xs font-semibold uppercase text-slate-500">Exploration mode</legend>

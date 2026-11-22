@@ -25,9 +25,25 @@ export interface PublicCorrection {
   approvedAt: string | null;
   appliedAt: string | null;
   retestRunId: string | null;
+  retestRuns?: string[];
   verification: { verified: boolean; checks: VerificationCheck[] } | null;
   restoredAt: string | null;
   log: { at: string; event: string; detail: string }[];
+}
+
+/** Is a discovered tutorial still what the live docs page shows? */
+export interface TutorialFreshness {
+  id: string;
+  status: 'current' | 'stale' | 'unavailable';
+  discoveredSha256: string | null;
+  liveSha256: string | null;
+  reason: string | null;
+}
+
+export interface FreshnessReport {
+  checkedAt: string;
+  discoveredAt: string | null;
+  tutorials: TutorialFreshness[];
 }
 
 export interface Health {
@@ -58,7 +74,7 @@ export interface PublicRun {
   assertions?: { query: string; extracted: string | null; passed: boolean; isCheck: boolean }[];
   visitedOrigins?: string[];
   state: RunState;
-  tutorial?: Pick<Tutorial, 'id' | 'title' | 'url' | 'method' | 'steps' | 'outcomes'>;
+  tutorial?: Pick<Tutorial, 'id' | 'title' | 'url' | 'method' | 'steps' | 'outcomes' | 'sourceSha256'>;
   appStartUrl?: string;
   objective?: string;
   objectiveMapping?: { objectiveLine: number; kind: 'step' | 'outcome'; index: number }[];

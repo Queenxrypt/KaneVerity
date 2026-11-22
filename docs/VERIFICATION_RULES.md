@@ -34,6 +34,20 @@ This file contains no application answers and is not used at runtime.
 - Before each run, the orchestrator checks that the application URL responds. If it doesn't, the result is BLOCKED.
 - Steps within one tutorial run share state, as a real user's session would.
 
+## 4a. Stale-discovery protection
+
+- A verification run uses the tutorial as it was discovered. Before any run starts, KaneVerity reads the live docs page again and compares its content fingerprint with the discovered one.
+- If they differ, or the live page can't be read, the run is refused with an explanation, nothing is queued and no credits are used. **Discover again** is the refresh path.
+- Discovery is refreshed automatically after a correction is applied and after it is restored. If that refresh fails, it is recorded in the correction's log and the guard keeps refusing runs until discovery is refreshed.
+- The Tutorials page marks stale tutorials and disables them; the Dashboard warns that its status is for the discovered version.
+
+## 4b. Tutorial status (shared by the Dashboard and the Tutorials page)
+
+- Only finished **verification** and **retest** runs count towards a tutorial's status. **Exploration** runs never count as verification; they are labelled as explorations everywhere.
+- A result applies to one documentation version. A tutorial's status comes from its latest counting run on the version currently discovered; older results are kept but shown as for an earlier version.
+- **VERIFIED** is shown only for a correction in state `verified` for that exact version, with a retest, while the current result is PASSED. Restoring the original invalidates it.
+- A finding is **open** while the current result is a FAILED documentation defect, and **resolved** once its correction is VERIFIED. BLOCKED and NEEDS REVIEW are never findings.
+
 ## 5. Source references
 
 - The docs server marks each step and outcome with `data-source-file`, `data-source-line` and `data-source-text`, and each page with `data-source-sha256`. Line numbers are recalculated from the current file on every request.
@@ -83,7 +97,13 @@ The mode is chosen by the user and recorded on the run, in the correction's expl
 
 **Applying.** The orchestrator, not Claude, produces the unified diff, keeps the original and a backup, and writes the file only after human approval, only inside `apps/docs/content/` (D1), and only if the file still has the fingerprint that was reviewed. **Approve & apply** writes the correction only: it records one `applied` audit event, leaves the correction in the `applied` state, and starts no Kane run.
 
-**Retest.** **Start Kane retest** is a separate, explicitly confirmed action, accepted only for a correction in the `applied` state (a second request while one is starting is refused).
+**Retest.** **Start Kane retest** is a separate, explicitly confirmed action, accepted only for a correction in the `applied` state, or `not_verified` to try again (a second request while one is starting is refused). Every retest run is kept in the correction's history.
+
+**Open corrections.** Only one correction per tutorial may be in progress. Every state except `rejected`, `closed`, `restored` and `verified` is open, including `applied` and `error`.
+
+**Recovery.** From `error`: ask Claude again, run a Kane exploration, or close the correction (`closed`; nothing was written). From `not_verified`: retest again, or restore the original.
+
+**Restore.** Restoring puts the original back only if the file is exactly the applied correction. Restoring a **VERIFIED** correction needs an explicit confirmation, because it invalidates the VERIFIED result: the tutorial shows its original result again. The retest record stays in the history.
 
 **D6: VERIFIED.** The rules below are unchanged by this split. Kane retests (`kind: retest`) the tutorial as re-extracted from the live docs page. The correction is VERIFIED only if all of the following hold:
 - the live page fingerprint equals the approved document's fingerprint

@@ -1,7 +1,7 @@
 // Client for the local KaneVerity orchestrator (via the Vite /api proxy).
 // Every request carries X-KaneVerity: 1; mutating requests send JSON.
 
-import type { Discovery, Health, Project, PublicCorrection, PublicRun } from './types.ts';
+import type { Discovery, FreshnessReport, Health, Project, PublicCorrection, PublicRun } from './types.ts';
 
 export class ApiError extends Error {
   status: number;
@@ -44,6 +44,7 @@ export const api = {
   saveProject: (docsUrl: string, appUrl: string) => request<{ project: Project }>('/project', { method: 'POST', body: { docsUrl, appUrl } }),
   discover: () => request<Discovery>('/discover', { method: 'POST', body: {} }),
   discovery: () => request<Discovery | null>('/discovery'),
+  freshness: () => request<FreshnessReport>('/discovery/freshness'),
   startRuns: (tutorialIds: string[]) => request<{ runIds: string[]; estimatedCredits: number }>('/runs', { method: 'POST', body: { tutorialIds } }),
   runs: () => request<PublicRun[]>('/runs'),
   run: (id: string) => request<PublicRun>(`/runs/${encodeURIComponent(id)}`),
@@ -51,7 +52,7 @@ export const api = {
   startCorrection: (runId: string) => request<PublicCorrection>(`/runs/${encodeURIComponent(runId)}/corrections`, { method: 'POST', body: {} }),
   corrections: () => request<PublicCorrection[]>('/corrections'),
   correction: (id: string) => request<PublicCorrection>(`/corrections/${encodeURIComponent(id)}`),
-  correctionAction: (id: string, action: 'analyze' | 'explore' | 'approve' | 'retest' | 'reject' | 'restore', body: Record<string, unknown> = {}) => request<PublicCorrection>(`/corrections/${encodeURIComponent(id)}/${action}`, { method: 'POST', body }),
+  correctionAction: (id: string, action: 'analyze' | 'explore' | 'approve' | 'retest' | 'reject' | 'restore' | 'dismiss', body: Record<string, unknown> = {}) => request<PublicCorrection>(`/corrections/${encodeURIComponent(id)}/${action}`, { method: 'POST', body }),
 };
 
 export type Transport = 'live' | 'polling';

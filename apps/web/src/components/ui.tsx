@@ -3,7 +3,8 @@
 
 import { useEffect, useRef, type ReactNode } from 'react';
 import { ORCHESTRATOR_DOWN } from '../api.ts';
-import type { Health, PublicRun, SourceRef as Ref, VerificationStatus } from '../types.ts';
+import type { Health, PublicRun, SourceRef as Ref, TutorialFreshness, VerificationStatus } from '../types.ts';
+import { RUN_KIND_LABEL, type RunKind, type StatusRun } from '../../../orchestrator/src/status.ts';
 
 const STATUS_STYLE: Record<VerificationStatus, { label: string; cls: string; hint: string }> = {
   PASSED: { label: 'PASSED', cls: 'bg-pass-soft text-pass border-pass/30', hint: 'Documented journey and every expected outcome verified by Kane.' },
@@ -15,6 +16,14 @@ const STATUS_STYLE: Record<VerificationStatus, { label: string; cls: string; hin
 export function StatusBadge({ run, status, large }: { run?: PublicRun; status?: VerificationStatus | null; large?: boolean }) {
   const size = large ? 'text-sm px-3 py-1' : 'text-xs px-2 py-0.5';
   const s = status ?? run?.classification?.status ?? null;
+  if (!status && run?.kind === 'exploration' && run.state === 'finished') {
+    // An exploration result is never a verification status.
+    return (
+      <span title="Exploration result: it only looks for the current route for a correction and never counts as verification." className={`inline-flex items-center rounded-full border border-dashed border-slate-400 font-semibold tracking-wide text-slate-600 ${size}`}>
+        EXPLORED
+      </span>
+    );
+  }
   if (!s) {
     const state = run?.state ?? 'queued';
     return <span className={`inline-flex items-center rounded-full border font-semibold tracking-wide bg-brand-soft text-brand border-brand/30 ${size}`}>{state === 'running' ? 'RUNNING' : 'QUEUED'}</span>;
@@ -101,15 +110,19 @@ export function CostSummary({ health }: { health: Health | null }) {
     <div data-testid="cost-summary" className="text-sm">
       <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
         <span>
-          <span className="font-semibold">{c.reportedCredits}</span> credits used by KaneVerity runs <span className="text-slate-500">(reported by Kane, {c.runsReported} run{c.runsReported === 1 ? '' : 's'})</span>
+          <span className="font-semibold">{c.reportedCredits}</span> credits used by KaneVerity's Kane runs <span className="text-slate-500">(reported by Kane for {c.runsReported} run{c.runsReported === 1 ? '' : 's'}: verifications, explorations and retests)</span>
         </span>
         {c.runsEstimated > 0 && (
           <span className="text-review">
             + about {c.estimatedCredits} estimated for {c.runsEstimated} run{c.runsEstimated === 1 ? '' : 's'} where Kane reported no cost
           </span>
         )}
-        {c.runsWithoutAgentWork > 0 && <span className="text-slate-500">{c.runsWithoutAgentWork} run(s) stopped before any Kane agent work (0)</span>}
-        {c.pendingRuns > 0 && <span className="text-slate-500">{c.pendingRuns} run(s) in progress, cost not known yet</span>}
+        {c.runsWithoutAgentWork > 0 && (
+          <span className="text-slate-500">
+            {c.runsWithoutAgentWork} run{c.runsWithoutAgentWork === 1 ? '' : 's'} stopped before Kane did any agent work (0 credits)
+          </span>
+        )}
+        {c.pendingRuns > 0 && <span className="text-slate-500">{c.pendingRuns} run{c.pendingRuns === 1 ? '' : 's'} in progress, cost not known yet</span>}
       </div>
     </div>
   );
@@ -120,8 +133,8 @@ export function RunCost({ run }: { run: { state?: string; credits?: number | nul
   if (run.state !== 'finished') return <span className="text-slate-500">cost not known yet</span>;
   if (run.costBasis === 'reported' || (run.costBasis == null && run.credits != null)) return <span>{run.credits} credits (reported by Kane)</span>;
   if (run.costBasis === 'estimated') return <span className="text-review">about {run.estimatedCredits ?? '?'} credits (estimate: Kane reported no cost)</span>;
-  if (run.costBasis === 'not_started') return <span className="text-slate-500">0 (Kane did not start)</span>;
-  return <span className="text-slate-500">0 (stopped before any Kane agent work)</span>;
+  if (run.costBasis === 'not_started') return <span className="text-slate-500">0 credits (Kane did not start)</span>;
+  return <span className="text-slate-500">0 credits (stopped before Kane did any agent work)</span>;
 }
 
 export function ConfirmDialog({
@@ -130,6 +143,7 @@ export function ConfirmDialog({
   children,
   confirmLabel,
   busy,
+  confirmDisabled,
   onConfirm,
   onCancel,
 }: {
@@ -138,6 +152,8 @@ export function ConfirmDialog({
   children: ReactNode;
   confirmLabel: string;
   busy?: boolean;
+  /** Keeps the confirm button disabled (for example until an explicit acknowledgement is ticked). */
+  confirmDisabled?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -157,7 +173,7 @@ export function ConfirmDialog({
           <button type="button" className="rounded-md border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50" onClick={onCancel} disabled={busy}>
             Cancel
           </button>
-          <button type="button" className="rounded-md bg-brand px-4 py-2 text-sm font-semibold text-white hover:opacity-90 disabled:opacity-50" onClick={onConfirm} disabled={busy}>
+          <button type="button" className="rounded-md bg-brand px-4 py-2 text-sm font-semibold text-white hover:opacity-90 disabled:opacity-50" onClick={onConfirm} disabled={busy || confirmDisabled}>
             {busy ? 'Starting…' : confirmLabel}
           </button>
         </div>
@@ -182,9 +198,40 @@ export function formatTime(iso: string | null | undefined): string {
   return Number.isNaN(d.getTime()) ? '' : d.toLocaleString();
 }
 
-/** Latest finished-or-active run per tutorial id. Runs arrive newest first. */
-export function latestByTutorial(runs: PublicRun[]): Map<string, PublicRun> {
-  const m = new Map<string, PublicRun>();
-  for (const r of runs) if (r.tutorial && !m.has(r.tutorial.id)) m.set(r.tutorial.id, r);
-  return m;
+/** Public runs in the shape the shared status rules use (runs without a tutorial are skipped). */
+export function statusRuns(runs: PublicRun[]): StatusRun[] {
+  return runs.filter((r) => !!r.tutorial).map((r) => ({ ...r, createdAt: r.createdAt ?? '', tutorial: r.tutorial! }));
+}
+
+export function RunKindBadge({ kind }: { kind?: RunKind | null }) {
+  const k = kind ?? 'verification';
+  const cls = k === 'verification' ? 'border-slate-300 text-slate-700' : k === 'retest' ? 'border-brand/40 text-brand' : 'border-dashed border-slate-400 text-slate-500';
+  const hint =
+    k === 'exploration'
+      ? 'Exploration: looks for the current route for a correction. Never counts as verification.'
+      : k === 'retest'
+        ? 'Retest: independent Kane verification of an approved correction.'
+        : 'Verification: Kane follows the tutorial as documented.';
+  return (
+    <span data-testid="run-kind" title={hint} className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${cls}`}>
+      {RUN_KIND_LABEL[k]}
+    </span>
+  );
+}
+
+export function VerifiedBadge() {
+  return (
+    <span data-testid="verified-badge" title="A human-approved correction for this exact documentation version passed every condition of an independent Kane retest." className="inline-flex items-center rounded-full border border-pass/40 bg-pass px-2 py-0.5 text-xs font-bold tracking-wide text-white">
+      VERIFIED
+    </span>
+  );
+}
+
+export function FreshnessNote({ f }: { f: TutorialFreshness | undefined }) {
+  if (!f || f.status === 'current') return null;
+  return (
+    <span data-testid="stale-badge" title={f.reason ?? ''} className="inline-flex items-center rounded-full border border-review/40 bg-review-soft px-2 py-0.5 text-xs font-semibold text-review">
+      {f.status === 'stale' ? 'STALE: discover again' : 'LIVE PAGE UNAVAILABLE'}
+    </span>
+  );
 }

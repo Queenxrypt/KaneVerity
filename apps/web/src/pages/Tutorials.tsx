@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../api.ts';
-import { Card, ConfirmDialog, CostSummary, ErrorNote, latestByTutorial, SourceRef, StatusBadge } from '../components/ui.tsx';
+import { Card, ConfirmDialog, CostSummary, ErrorNote, FreshnessNote, RunKindBadge, SourceRef, StatusBadge, statusRuns, VerifiedBadge } from '../components/ui.tsx';
+import { tutorialStatus, type TutorialStatus } from '../../../orchestrator/src/status.ts';
+import { CorrectionBadge } from './Corrections.tsx';
 import { useHealth } from '../health.tsx';
-import type { Discovery, PublicRun, Tutorial } from '../types.ts';
+import type { Discovery, FreshnessReport, PublicCorrection, PublicRun, Tutorial, TutorialFreshness } from '../types.ts';
 
 function safeDocsLink(url: string, docsOrigin: string | undefined): string | null {
   try {
@@ -15,21 +17,26 @@ function safeDocsLink(url: string, docsOrigin: string | undefined): string | nul
 
 function TutorialCard({
   t,
-  latest,
+  st,
+  active,
+  fresh,
   docsOrigin,
   selected,
   onToggle,
   busy,
 }: {
   t: Tutorial;
-  latest?: PublicRun;
+  st: TutorialStatus;
+  active?: PublicRun;
+  fresh?: TutorialFreshness;
   docsOrigin?: string;
   selected: boolean;
   onToggle: () => void;
   busy: boolean;
 }) {
-  const active = latest && latest.state !== 'finished';
-  const disabled = !!t.notRunnable || !!active || busy;
+  const stale = !!fresh && fresh.status !== 'current';
+  const disabled = !!t.notRunnable || !!active || busy || stale;
+  const c = st.correction;
   const link = safeDocsLink(t.url, docsOrigin);
   return (
     <div className={`rounded-lg border bg-white ${selected ? 'border-brand' : 'border-slate-200'}`} data-testid={`tutorial-${t.id}`}>
@@ -45,7 +52,10 @@ function TutorialCard({
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="font-semibold">{t.title}</h3>
-            {latest && <StatusBadge run={latest} />}
+            {st.status ? <StatusBadge status={st.status} /> : <span data-testid="not-run" className="inline-flex items-center rounded-full border border-slate-300 px-2 py-0.5 text-xs font-semibold text-slate-600">NOT RUN YET</span>}
+            {st.verified && <VerifiedBadge />}
+            {active && <StatusBadge run={active} />}
+            <FreshnessNote f={fresh} />
           </div>
           <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-600">
             <span>{t.steps.length} steps</span>
@@ -58,12 +68,39 @@ function TutorialCard({
             ) : (
               <span className="font-mono">{t.url}</span>
             )}
-            {latest && (
-              <Link to={`/runs/${latest.runId}`} className="text-brand hover:underline">
-                Latest run
-              </Link>
+            {st.run && (
+              <span className="inline-flex items-center gap-1">
+                <RunKindBadge kind={st.run.kind} />
+                <Link to={`/runs/${st.run.runId}`} className="text-brand hover:underline">
+                  Result for this version
+                </Link>
+              </span>
             )}
           </div>
+          {st.resultForEarlierVersion && st.latestRun && (
+            <p data-testid="earlier-version" className="mt-2 text-sm text-slate-600">
+              Not verified in its current version yet. The latest result (
+              <Link to={`/runs/${st.latestRun.runId}`} className="text-brand hover:underline">
+                {st.latestRun.classification?.status === 'NEEDS_REVIEW' ? 'NEEDS REVIEW' : st.latestRun.classification?.status}
+              </Link>
+              ) is for an earlier version of this tutorial.
+            </p>
+          )}
+          {c && (
+            <p data-testid="tutorial-correction" className="mt-2 flex flex-wrap items-center gap-2 text-sm">
+              <span className="text-slate-600">Correction:</span>
+              <CorrectionBadge state={c.state as PublicCorrection['state']} />
+              <Link to={`/corrections/${c.id}`} className="font-mono text-xs text-brand hover:underline">
+                {c.id}
+              </Link>
+              {st.verifiedBy?.retestRunId && (
+                <Link to={`/runs/${st.verifiedBy.retestRunId}`} className="text-xs text-brand hover:underline">
+                  Kane retest
+                </Link>
+              )}
+            </p>
+          )}
+          {stale && <p className="mt-2 text-sm text-review">Cannot be verified until discovery is refreshed: {fresh?.reason}</p>}
           {t.notRunnable && <p className="mt-2 text-sm text-fail">Cannot be verified: {t.notRunnable}</p>}
           {t.warnings.map((w) => (
             <p key={w} className="mt-2 text-sm text-review">
@@ -110,6 +147,9 @@ export function Tutorials() {
   const navigate = useNavigate();
   const [discovery, setDiscovery] = useState<Discovery | null>(null);
   const [runs, setRuns] = useState<PublicRun[]>([]);
+  const [corrections, setCorrections] = useState<PublicCorrection[]>([]);
+  const [freshness, setFreshness] = useState<FreshnessReport | null>(null);
+  const [freshnessError, setFreshnessError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string[]>([]);
   const [confirm, setConfirm] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -118,10 +158,18 @@ export function Tutorials() {
 
   const load = useCallback(async () => {
     try {
-      const [d, r] = await Promise.all([api.discovery(), api.runs()]);
+      const [d, r, cs] = await Promise.all([api.discovery(), api.runs(), api.corrections()]);
       setDiscovery(d);
       setRuns(r);
+      setCorrections(cs);
       setError(null);
+      try {
+        setFreshness(await api.freshness());
+        setFreshnessError(null);
+      } catch (e) {
+        setFreshness(null);
+        setFreshnessError((e as Error).message);
+      }
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -139,6 +187,7 @@ export function Tutorials() {
     try {
       setDiscovery(await api.discover());
       setError(null);
+      await load();
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -164,7 +213,10 @@ export function Tutorials() {
     }
   }
 
-  const latest = latestByTutorial(runs);
+  const sruns = statusRuns(runs);
+  const freshById = new Map((freshness?.tutorials ?? []).map((f) => [f.id, f]));
+  const staleCount = (freshness?.tutorials ?? []).filter((f) => f.status !== 'current').length;
+  const activeRun = (id: string) => runs.find((r) => r.tutorial?.id === id && r.state !== 'finished');
   const ready = !!health && health.appReachable && health.docsReachable && health.kane.loggedIn;
   const [lo, hi] = health?.credits.estimatedByKind.verification ?? [12, 35];
 
@@ -188,6 +240,17 @@ export function Tutorials() {
       </div>
       {!ready && health && <p className="text-sm text-review">Verification is unavailable until the docs, the app and Kane CLI are all ready (see Dashboard).</p>}
       <ErrorNote message={error} />
+      {staleCount > 0 && (
+        <div data-testid="stale-banner" className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-review/40 bg-review-soft p-4 text-sm text-review">
+          <span>
+            Discovery is out of date for {staleCount} tutorial{staleCount === 1 ? '' : 's'}: the live documentation no longer matches what was discovered. Those tutorials can't be verified until you discover again.
+          </span>
+          <button type="button" onClick={rediscover} disabled={busy} className="rounded-md bg-white px-3 py-1.5 font-medium text-review ring-1 ring-review/40 hover:bg-slate-50 disabled:opacity-50">
+            Discover again
+          </button>
+        </div>
+      )}
+      {freshnessError && <p className="text-sm text-review">The live documentation could not be checked ({freshnessError}). Runs are only started after this check passes.</p>}
 
       {loading ? (
         <p className="text-sm text-slate-600">Loading…</p>
@@ -205,7 +268,9 @@ export function Tutorials() {
               <TutorialCard
                 key={t.id}
                 t={t}
-                latest={latest.get(t.id)}
+                st={tutorialStatus(t, sruns, corrections)}
+                active={activeRun(t.id)}
+                fresh={freshById.get(t.id)}
                 docsOrigin={health?.project?.docsOrigin}
                 selected={selected.includes(t.id)}
                 busy={busy}

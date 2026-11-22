@@ -209,21 +209,61 @@ test('full correction loop: FAILED -> Claude asks for exploration -> Kane explor
   assert.match(appliedEvents[0].detail, new RegExp(`fingerprint ${c.proposal.proposedSha256.slice(0, 12)}`));
   assert.equal(((await (await fetch(`${api}/api/runs`, { headers: { 'X-KaneVerity': '1' } })).json()) as unknown[]).length, runsBeforeApprove, 'approve starts no Kane run');
   assert.equal((await post(`/api/corrections/${cid}/approve`)).status, 409, 'cannot approve twice');
+
+  // AUDIT BUG: while a correction is applied, no second correction may start for the tutorial.
+  const second = await post(`/api/runs/${runIds[0]}/corrections`);
+  assert.equal(second.status, 409);
+  assert.match((await j(second)).error, /already open/);
+
+  // Discovery is refreshed after approval: it now shows the applied document and is current.
+  const disc = await j(await fetch(`${api}/api/discovery`));
+  assert.equal(disc.tutorials.find((t: { id: string }) => t.id === 'generate-an-api-key').sourceSha256, c.proposal.proposedSha256, 'discovery refreshed after approval');
+  const fresh = await j(await fetch(`${api}/api/discovery/freshness`));
+  assert.ok(fresh.tutorials.every((t: { status: string }) => t.status === 'current'), JSON.stringify(fresh.tutorials));
+
+  // Recovery from not_verified: a first retest that fails leaves the issue open; a retest
+  // may be tried again (separately confirmed), and both retests stay in the history.
+  const passingRetest = process.env.FAKE_KANE_FIXTURE;
+  process.env.FAKE_KANE_FIXTURE = await writeFixture('retest-fail', { exitCode: 1, cliVersion: '0.10.5', progress: [], runEnd: { type: 'run_end', status: 'failed', reason_code: 'assertion_error.step_not_achievable', summary: 'Could not finish.' } });
   assert.equal((await post(`/api/corrections/${cid}/retest`)).status, 202);
+  c = await waitFor(() => correction(cid), (x) => x.state !== 'retesting', 'failing retest');
+  assert.equal(c.state, 'not_verified', c.stateReason);
+  const firstRetest = c.retestRunId;
+  process.env.FAKE_KANE_FIXTURE = passingRetest;
+
+  assert.equal((await post(`/api/corrections/${cid}/retest`)).status, 202, 'retest again from not_verified');
   assert.equal((await post(`/api/corrections/${cid}/retest`)).status, 409, 'a second retest request is refused');
   c = await waitFor(() => correction(cid), (x) => x.state !== 'retesting', 'retest');
   assert.equal(c.state, 'verified', c.stateReason);
+  assert.deepEqual(c.retestRuns, [firstRetest, c.retestRunId], 'both retests kept in the history');
+  assert.notEqual(firstRetest, c.retestRunId);
   assert.ok(c.verification.checks.every((x: { ok: boolean }) => x.ok));
   const retest = await runRec(c.retestRunId);
   assert.equal(retest.kind, 'retest');
   assert.ok(retest.objective.includes("1. On the 'Dashboard', click 'Developer Settings'."), 'retest built from the corrected docs as written');
   assert.ok((await readdir(path.join(work, 'data', 'corrections', cid))).some((f) => f.startsWith('backup-')), 'backup kept');
 
-  // 6. Restore puts the original back (fingerprint-guarded).
-  assert.equal((await post(`/api/corrections/${cid}/restore`)).status, 202);
+  // 6. Restoring a VERIFIED correction needs explicit confirmation (it invalidates VERIFIED).
+  const corrected = await readFile(file, 'utf8');
+  for (const body of [{}, { confirm: true }, { confirm: 'yes' }]) {
+    const r = await post(`/api/corrections/${cid}/restore`, body);
+    assert.equal(r.status, 409, JSON.stringify(body));
+    assert.match((await j(r)).error, /VERIFIED/);
+  }
+  assert.equal(await readFile(file, 'utf8'), corrected, 'nothing restored without confirmation');
+  assert.equal((await correction(cid)).state, 'verified');
+
+  // Restore puts the original back (fingerprint-guarded) and invalidates VERIFIED.
+  assert.equal((await post(`/api/corrections/${cid}/restore`, { confirm: 'invalidate-verified' })).status, 202);
   assert.equal(await readFile(file, 'utf8'), originalText);
   c = await correction(cid);
   assert.equal(c.state, 'restored');
+  assert.match(c.stateReason, /VERIFIED result no longer applies/);
+  assert.ok(c.verification.verified, 'the retest record itself is kept as history');
+  assert.equal((await post(`/api/corrections/${cid}/restore`, { confirm: 'invalidate-verified' })).status, 409, 'cannot restore twice');
+  const discAfter = await j(await fetch(`${api}/api/discovery`));
+  assert.equal(discAfter.tutorials.find((t: { id: string }) => t.id === 'generate-an-api-key').sourceSha256, sha(originalText), 'discovery refreshed after restore');
+  assert.equal((await post(`/api/corrections/${cid}/retest`)).status, 409, 'a restored correction cannot be retested');
 });
 
 test('exploration that recorded an unexpected origin -> route_uncertain, and Claude cannot be asked for a proposal (D4)', async () => {
@@ -364,4 +404,89 @@ test('correction API: only documentation defects, ids validated, foreign origins
   assert.deepEqual(findLeaks(list), []);
   assert.ok(!/\.evidence\b|[\\/]private[\\/]|kaneverity-claude-/i.test(JSON.stringify(list)), 'no paths in correction records');
   void loadFixture;
+});
+
+test('recovery from error: an error state stays open, Claude can be asked again, or the correction can be closed', async () => {
+  const list = await j(await fetch(`${api}/api/corrections`));
+  const target = list.find((x: { state: string }) => x.state === 'route_confirmed');
+  assert.ok(target, 'a route_confirmed correction from the previous test');
+  const cid = target.id;
+
+  // An invalid Claude answer stops the review with an error.
+  await writeFile(path.join(work, 'answer-bad.json'), JSON.stringify({ structured: { decision: 'bogus' } }));
+  process.env.FAKE_CLAUDE_ANSWER = path.join(work, 'answer-bad.json');
+  assert.equal((await post(`/api/corrections/${cid}/analyze`)).status, 202);
+  let c = await waitFor(() => correction(cid), (x) => x.state !== 'analyzing', 'bad review');
+  assert.equal(c.state, 'error', c.stateReason);
+
+  // 'error' is still open: no second correction may start for this tutorial.
+  const failed = (await j(await fetch(`${api}/api/runs`))).find((r: { classification?: { status: string; documentationDefect: boolean }; kind: string }) => r.kind === 'verification' && r.classification?.status === 'FAILED');
+  const dup = await post(`/api/runs/${failed.runId}/corrections`);
+  assert.equal(dup.status, 409);
+  assert.match((await j(dup)).error, /already open/);
+
+  // Recovery 1: ask Claude again.
+  process.env.FAKE_CLAUDE_ANSWER = path.join(work, 'answer1.json');
+  assert.equal((await post(`/api/corrections/${cid}/analyze`)).status, 202, 'Claude may be asked again from error');
+  c = await waitFor(() => correction(cid), (x) => x.state !== 'analyzing', 'retry review');
+  assert.equal(c.state, 'needs_exploration');
+
+  // Recovery 2: close it (only from error). Nothing is written to the documentation.
+  assert.equal((await post(`/api/corrections/${cid}/dismiss`)).status, 409, 'only an error can be closed');
+  process.env.FAKE_CLAUDE_ANSWER = path.join(work, 'answer-bad.json');
+  await post(`/api/corrections/${cid}/analyze`);
+  c = await waitFor(() => correction(cid), (x) => x.state !== 'analyzing', 'bad review 2');
+  assert.equal(c.state, 'error');
+  const file = path.join(contentDir, 'tutorials', 'generate-an-api-key.md');
+  const before = await readFile(file, 'utf8');
+  assert.equal((await post(`/api/corrections/${cid}/dismiss`)).status, 202);
+  c = await correction(cid);
+  assert.equal(c.state, 'closed');
+  assert.equal(await readFile(file, 'utf8'), before, 'closing changes no documentation');
+  assert.equal((await post(`/api/corrections/${cid}/analyze`)).status, 409, 'a closed correction is final');
+});
+
+test('AUDIT BUG: stale discovery blocks verification runs until discovery is refreshed', async () => {
+  const file = path.join(contentDir, 'tutorials', 'create-a-project.md');
+  const original = await readFile(file, 'utf8');
+  assert.equal((await post('/api/discover')).status, 200);
+  const runsBefore = (await j(await fetch(`${api}/api/runs`))).length;
+  try {
+    // The docs change after discovery (here: an extra step), as an approved correction would.
+    await writeFile(file, original.replace('4. Click **Create project**.', '4. Click **Create project**.\n5. Click **Done**.'));
+    const r = await post('/api/runs', { tutorialIds: ['create-a-project'] });
+    assert.equal(r.status, 409);
+    const msg = (await j(r)).error;
+    assert.match(msg, /"Create a project" was not verified: The live documentation changed since discovery/);
+    assert.match(msg, /Discover again/);
+    assert.match(msg, /Nothing was run/);
+    assert.equal((await j(await fetch(`${api}/api/runs`))).length, runsBefore, 'no run was queued');
+
+    const fresh = await j(await fetch(`${api}/api/discovery/freshness`));
+    const byId = Object.fromEntries(fresh.tutorials.map((t: { id: string; status: string }) => [t.id, t.status]));
+    assert.equal(byId['create-a-project'], 'stale');
+    assert.equal(byId['generate-an-api-key'], 'current');
+
+    // Safe refresh path: Discover again, then the run may start.
+    assert.equal((await post('/api/discover')).status, 200);
+    assert.equal((await j(await fetch(`${api}/api/discovery/freshness`))).tutorials.find((t: { id: string }) => t.id === 'create-a-project').status, 'current');
+    process.env.FAKE_KANE_FIXTURE = path.join(TESTS_DIR, 'fixtures', 'acmedesk-apikey-outdated.json');
+    const ok = await post('/api/runs', { tutorialIds: ['create-a-project'] });
+    assert.equal(ok.status, 202);
+    const [rid] = (await j(ok)).runIds;
+    const run = await waitFor(() => runRec(rid), (x) => x.state === 'finished', 'run after refresh');
+    assert.equal(run.tutorial.steps.length, 5, 'the run used the refreshed tutorial');
+  } finally {
+    await writeFile(file, original);
+    await post('/api/discover');
+  }
+
+  // Unreadable live documentation: the check reports it as unavailable, never current.
+  const { checkFreshness } = await import('../src/discovery/freshness.ts');
+  const unreachable = await checkFreshness(
+    { id: 'x', title: 'X', url: 'http://127.0.0.1:9/tutorials/x', appStart: '/', method: 'data-kv', sourceSha256: 'a'.repeat(64), steps: [], outcomes: [], warnings: [], notRunnable: null },
+    { docsUrl: 'http://127.0.0.1:9/', docsOrigin: 'http://127.0.0.1:9', appUrl, appOrigin: new URL(appUrl).origin, savedAt: '' },
+  );
+  assert.equal(unreachable.status, 'unavailable');
+  assert.match(unreachable.reason ?? '', /could not be read/);
 });

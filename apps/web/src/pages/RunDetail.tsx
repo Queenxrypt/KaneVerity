@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, ApiError, ORCHESTRATOR_DOWN, subscribeRun, type Transport } from '../api.ts';
-import { Card, Collapsible, ConfirmDialog, ErrorNote, formatTime, RunCost, SourceRef, StatusBadge } from '../components/ui.tsx';
-import type { PublicRun } from '../types.ts';
+import { Card, Collapsible, ConfirmDialog, ErrorNote, formatTime, RunCost, RunKindBadge, SourceRef, StatusBadge } from '../components/ui.tsx';
+import { CORRECTION_CLOSED_STATES, correctionForRun } from '../../../orchestrator/src/status.ts';
+import { CorrectionBadge } from './Corrections.tsx';
+import type { PublicCorrection, PublicRun } from '../types.ts';
 
 const STEP_STYLE: Record<string, string> = {
   passed: 'text-pass',
@@ -68,6 +70,7 @@ export function RunDetail() {
   const [cancelling, setCancelling] = useState(false);
   const [confirmCorrection, setConfirmCorrection] = useState(false);
   const [starting, setStarting] = useState(false);
+  const [corrections, setCorrections] = useState<PublicCorrection[] | null>(null);
   const navigate = useNavigate();
 
   async function startCorrection() {
@@ -101,6 +104,12 @@ export function RunDetail() {
     };
   }, [runId, forcePoll]);
 
+  // Corrections link this run to its correction and retest (and decide whether
+  // "Propose correction" is still a valid action).
+  useEffect(() => {
+    api.corrections().then(setCorrections).catch(() => setCorrections(null));
+  }, [runId, run?.state]);
+
   useEffect(() => {
     document.title = `${run?.tutorial?.title ?? 'Run'} · KaneVerity`;
   }, [run?.tutorial?.title]);
@@ -119,6 +128,9 @@ export function RunDetail() {
   const c = run.classification;
   const t = run.tutorial;
   const active = run.state !== 'finished';
+  const linked = corrections ? (correctionForRun(run.runId, corrections) as PublicCorrection | null) : null;
+  const openForTutorial = corrections?.find((x) => x.tutorialId === t?.id && x.id !== linked?.id && !CORRECTION_CLOSED_STATES.includes(x.state) && x.state !== 'verified') ?? null;
+  const canPropose = !!c?.documentationDefect && run.kind !== 'exploration' && corrections !== null && (!linked || CORRECTION_CLOSED_STATES.includes(linked.state)) && !openForTutorial;
 
   async function cancel() {
     setCancelling(true);
@@ -149,7 +161,7 @@ export function RunDetail() {
               mode: {run.explorationMode ?? 'default'}
             </span>
           )}
-          {run.kind === 'retest' && <span className="rounded-full border border-slate-300 px-2 py-0.5 text-xs font-medium text-slate-600">Retest</span>}
+          {run.kind !== 'exploration' && <RunKindBadge kind={run.kind} />}
           {active && (
             <button type="button" onClick={cancel} disabled={cancelling} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium hover:bg-slate-50 disabled:opacity-50">
               {cancelling ? 'Cancelling…' : 'Cancel run'}
@@ -210,9 +222,40 @@ export function RunDetail() {
               </Link>
             </p>
           )}
-          {c.documentationDefect && run.kind !== 'exploration' && (
+          {linked && (
+            <div data-testid="run-correction" className="mt-3 rounded-md border border-slate-200 bg-slate-50 p-3 text-sm">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-medium">Correction for this finding:</span>
+                <CorrectionBadge state={linked.state} />
+                <Link to={`/corrections/${linked.id}`} className="font-mono text-xs text-brand hover:underline">
+                  {linked.id}
+                </Link>
+              </div>
+              {(linked.retestRuns ?? (linked.retestRunId ? [linked.retestRunId] : [])).length > 0 && (
+                <div className="mt-1 flex flex-wrap items-center gap-2">
+                  <span className="text-slate-600">Kane retest:</span>
+                  {(linked.retestRuns ?? [linked.retestRunId!]).map((id) => (
+                    <Link key={id} to={`/runs/${id}`} className="font-mono text-xs text-brand hover:underline">
+                      {id}
+                    </Link>
+                  ))}
+                </div>
+              )}
+              {linked.state === 'verified' && <p className="mt-1 text-pass">Resolved: the corrected tutorial passed an independent Kane retest (VERIFIED).</p>}
+              {linked.state === 'restored' && <p className="mt-1 text-slate-600">The original document was restored, so this finding applies again.</p>}
+            </div>
+          )}
+          {!linked && openForTutorial && c.documentationDefect && run.kind !== 'exploration' && (
+            <p className="mt-3 text-sm text-slate-600">
+              A correction for this tutorial is already in progress:{' '}
+              <Link to={`/corrections/${openForTutorial.id}`} className="font-mono text-xs text-brand hover:underline">
+                {openForTutorial.id}
+              </Link>
+            </p>
+          )}
+          {canPropose && (
             <button type="button" onClick={() => setConfirmCorrection(true)} className="mt-3 rounded-md bg-brand px-3 py-1.5 text-sm font-semibold text-white hover:opacity-90">
-              Propose correction
+              {linked ? 'Propose a new correction' : 'Propose correction'}
             </button>
           )}
         </Card>

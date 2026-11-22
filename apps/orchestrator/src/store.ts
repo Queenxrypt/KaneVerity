@@ -7,7 +7,7 @@
 //   data/runs/<id>/private/      raw Kane output, stderr, evidence pack (never served)
 //   data/runs/<id>/work/         Kane's working directory for the run (never served)
 
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { config } from './config.ts';
 
@@ -22,18 +22,69 @@ export function runDir(runId: string, ...parts: string[]): string {
   return dataPath('runs', runId, ...parts);
 }
 
-export async function writeJson(file: string, value: unknown): Promise<void> {
+// Writes to one file are queued so they land in call order, and each uses its own
+// temporary file. On Windows, replacing a file by rename fails with
+// EPERM/EBUSY/EACCES while another request is reading it (the UI polls records);
+// measured here, that can last most of a second. Before this fix such a failure
+// silently lost the write and could leave a correction stuck in "analyzing".
+// Now the rename is retried (~1.7s), and if it still can't replace the file the
+// data is copied over it in place, so a write is never lost.
+const writeQueues = new Map<string, Promise<void>>();
+let tmpSeq = 0;
+const RENAME_RETRY_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
+const RENAME_ATTEMPTS = 15;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function writeAtomic(file: string, data: string): Promise<void> {
   await mkdir(path.dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
-  await writeFile(tmp, JSON.stringify(value, null, 2) + '\n', 'utf8');
-  await rename(tmp, file);
+  const tmp = `${file}.${process.pid}.${++tmpSeq}.tmp`;
+  await writeFile(tmp, data, 'utf8');
+  try {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await rename(tmp, file);
+        return;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code ?? '';
+        if (!RENAME_RETRY_CODES.has(code)) throw err;
+        if (attempt >= RENAME_ATTEMPTS) {
+          // Last resort: overwrite in place (not atomic; readJson re-reads a partial file).
+          await copyFile(tmp, file);
+          return;
+        }
+        await sleep(Math.min(25 * attempt, 150));
+      }
+    }
+  } finally {
+    await rm(tmp, { force: true }).catch(() => undefined);
+  }
+}
+
+export async function writeJson(file: string, value: unknown): Promise<void> {
+  // Serialize now: callers may keep changing the object after this call.
+  const data = JSON.stringify(value, null, 2) + '\n';
+  const next = (writeQueues.get(file) ?? Promise.resolve()).catch(() => undefined).then(() => writeAtomic(file, data));
+  writeQueues.set(file, next);
+  try {
+    await next;
+  } finally {
+    if (writeQueues.get(file) === next) writeQueues.delete(file);
+  }
 }
 
 export async function readJson<T>(file: string): Promise<T | null> {
-  try {
-    return JSON.parse(await readFile(file, 'utf8')) as T;
-  } catch {
-    return null;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return JSON.parse(await readFile(file, 'utf8')) as T;
+    } catch (err) {
+      // A file caught mid-overwrite (see writeAtomic) is re-read briefly; a missing
+      // or genuinely invalid file still reads as null.
+      if (err instanceof SyntaxError && attempt < 5) {
+        await sleep(20);
+        continue;
+      }
+      return null;
+    }
   }
 }
 

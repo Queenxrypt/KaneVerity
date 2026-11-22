@@ -18,6 +18,7 @@ export const STATE_LABEL: Record<CorrectionState, { label: string; cls: string }
   retesting: { label: 'Kane retesting', cls: 'bg-brand-soft text-brand border-brand/30' },
   verified: { label: 'VERIFIED', cls: 'bg-pass-soft text-pass border-pass/30' },
   not_verified: { label: 'Not verified (open)', cls: 'bg-fail-soft text-fail border-fail/30' },
+  closed: { label: 'Closed after an error', cls: 'bg-blocked-soft text-blocked border-blocked/30' },
   restored: { label: 'Original restored', cls: 'bg-blocked-soft text-blocked border-blocked/30' },
   error: { label: 'Error', cls: 'bg-fail-soft text-fail border-fail/30' },
 };

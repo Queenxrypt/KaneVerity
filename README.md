@@ -62,7 +62,7 @@ The orchestrator runs Kane CLI and Claude Code as local processes, so the full w
 | AcmeDesk Docs | ✅ Built (`apps/docs`) |
 | Orchestrator: discovery, extraction, Kane runner, evidence, classification (4a) | ✅ Built (`apps/orchestrator`) |
 | KaneVerity interface (4b) | ✅ Built (`apps/web`) |
-| Claude correction loop (exploration, review, independent retest) | ✅ Built, real run pending (`apps/orchestrator/src/correct`) |
+| Claude correction loop (exploration, review, independent retest) | ✅ Built and run for real: the API-key correction was VERIFIED by an independent Kane retest (`apps/orchestrator/src/correct`) |
 | KaneVerity UI | ⏳ Not started |
 
 ## Prerequisites
@@ -166,7 +166,14 @@ A FAILED run with a confirmed documentation defect can start a correction (Run p
 4. **You review** the diff, rationale and evidence citations, then reject or choose **Approve & apply**. Approving only writes the Markdown (fingerprint-guarded, original and backup kept in `data/corrections/`) and records one `applied` audit event. It does not start Kane or spend credits; the correction waits in the **applied** state.
 5. **Start Kane retest** is a separate action with its own credit confirmation, available only for an applied correction. Kane retests the tutorial as re-extracted from the live docs page. **VERIFIED** requires all of: the approved document's fingerprint, a clean start, exit 0 and `run_end` passed, every outcome matched to a distinct passing assertion, a valid finalized evidence pack, and no unexpected origin (these rules are unchanged by the split). Otherwise the correction stays open. Claude's answer never decides it.
 
-**Restore original** puts the tutorial back for repeat demos. Full rules: [`docs/VERIFICATION_RULES.md`](docs/VERIFICATION_RULES.md).
+**Restore original** puts the tutorial back for repeat demos. Restoring a VERIFIED correction needs an explicit confirmation, because it invalidates that VERIFIED result.
+
+**Status and safeguards.**
+- Before every verification run, KaneVerity checks the live docs page against what was discovered. If the page changed, the run is refused (no credits used) until you **Discover again**. Discovery is refreshed automatically after a correction is applied or restored.
+- Only verification and retest runs set a tutorial's status; exploration runs never do. The Dashboard and Tutorials page use the same rules, show VERIFIED tutorials, open and resolved findings, and corrections awaiting review.
+- Only one correction per tutorial can be in progress. A correction that stopped with an error can be retried or closed; one that was not verified can be retested again or restored.
+
+Full rules: [`docs/VERIFICATION_RULES.md`](docs/VERIFICATION_RULES.md).
 
 ## KaneVerity interface
 

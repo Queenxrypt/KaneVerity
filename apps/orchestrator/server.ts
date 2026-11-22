@@ -14,7 +14,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config, estimateRange } from './src/config.ts';
-import { discover } from './src/discovery/crawl.ts';
+import { checkAll, checkFreshness, refreshDiscovery } from './src/discovery/freshness.ts';
 import { Runner, publicRecord } from './src/kane/runner.ts';
 import { CorrectionError, CorrectionService, publicCorrection } from './src/correct/service.ts';
 import { CORRECTION_ID_PATTERN } from './src/correct/store.ts';
@@ -174,9 +174,14 @@ export function createOrchestrator(runner = new Runner(), corrections = new Corr
         await readBody(req);
         const project = await readJson<Project>(dataPath('project.json'));
         if (!project) throw new HttpError(409, 'Connect a project first.');
-        const result = await discover(project.docsUrl, project.appOrigin);
-        await writeJson(dataPath('discovery.json'), result);
-        return json(res, 200, result);
+        return json(res, 200, await refreshDiscovery(project));
+      }
+
+      if (method === 'GET' && p === '/api/discovery/freshness') {
+        const project = await readJson<Project>(dataPath('project.json'));
+        const discovery = await readJson<Discovery>(dataPath('discovery.json'));
+        if (!project || !discovery) return json(res, 200, { checkedAt: new Date().toISOString(), discoveredAt: null, tutorials: [] });
+        return json(res, 200, { checkedAt: new Date().toISOString(), discoveredAt: discovery.discoveredAt, tutorials: await checkAll(discovery, project) });
       }
 
       if (method === 'GET' && p === '/api/discovery') {
@@ -197,6 +202,14 @@ export function createOrchestrator(runner = new Runner(), corrections = new Corr
         if (tutorials.some((t) => !t)) throw new HttpError(404, 'Unknown tutorial id.');
         const notRunnable = tutorials.find((t) => t!.notRunnable);
         if (notRunnable) throw new HttpError(422, `"${notRunnable.title}" cannot be verified: ${notRunnable.notRunnable}`);
+        // Stale-discovery protection: a run uses the discovered tutorial, so the live page
+        // must still show exactly that content. Otherwise nothing starts and no credits are used.
+        for (const t of tutorials) {
+          const fresh = await checkFreshness(t!, project);
+          if (fresh.status !== 'current') {
+            throw new HttpError(409, `"${t!.title}" was not verified: ${fresh.reason} Discover again to refresh the tutorials, then verify. Nothing was run.`);
+          }
+        }
         const runIds: string[] = [];
         for (const t of tutorials) {
           try {
@@ -288,7 +301,7 @@ export function createOrchestrator(runner = new Runner(), corrections = new Corr
       if (method === 'GET' && p === '/api/corrections') {
         return json(res, 200, (await corrections.list()).map(publicCorrection));
       }
-      const cMatch = /^\/api\/corrections\/([^/]+)(?:\/(analyze|explore|approve|retest|reject|restore))?$/.exec(p);
+      const cMatch = /^\/api\/corrections\/([^/]+)(?:\/(analyze|explore|approve|retest|reject|restore|dismiss))?$/.exec(p);
       if (cMatch) {
         const id = cMatch[1];
         if (!CORRECTION_ID_PATTERN.test(id)) throw new HttpError(404, 'Correction not found.');
@@ -300,7 +313,7 @@ export function createOrchestrator(runner = new Runner(), corrections = new Corr
           // Exploration mode: only allow-listed ids are accepted (validated in the service); default if omitted.
           const mode = body && typeof body === 'object' && 'mode' in body ? body.mode : 'default';
           const rec =
-            action === 'explore' ? await corrections.explore(id, mode) : action === 'approve' ? await corrections.approve(id) : action === 'retest' ? await corrections.retest(id) : action === 'reject' ? await corrections.reject(id) : await corrections.restore(id);
+            action === 'explore' ? await corrections.explore(id, mode) : action === 'approve' ? await corrections.approve(id) : action === 'retest' ? await corrections.retest(id) : action === 'reject' ? await corrections.reject(id) : action === 'dismiss' ? await corrections.dismiss(id) : await corrections.restore(id, body);
           return json(res, 202, publicCorrection(rec));
         }
       }
