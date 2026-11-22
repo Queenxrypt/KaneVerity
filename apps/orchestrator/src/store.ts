@@ -127,6 +127,9 @@ export interface CostSummary {
   runsMeasured: number;
   /** Jobs whose cost could not be determined (shown, never counted as 0). */
   runsUnknownCost: number;
+  /** Of the reported entries, how many were Kane Assurance jobs (kind "assurance:*"), and their credits. */
+  assuranceJobsReported: number;
+  assuranceCreditsReported: number;
 }
 
 export function basisOf(e: CreditEntry): CostBasis {
@@ -146,13 +149,17 @@ export async function addCredits(entry: CreditEntry): Promise<void> {
 }
 
 export function summarizeCosts(ledger: CreditEntry[]): CostSummary {
-  const s: CostSummary = { reportedCredits: 0, estimatedCredits: 0, runsReported: 0, runsEstimated: 0, runsWithoutAgentWork: 0, measuredCredits: 0, runsMeasured: 0, runsUnknownCost: 0 };
+  const s: CostSummary = { reportedCredits: 0, estimatedCredits: 0, runsReported: 0, runsEstimated: 0, runsWithoutAgentWork: 0, measuredCredits: 0, runsMeasured: 0, runsUnknownCost: 0, assuranceJobsReported: 0, assuranceCreditsReported: 0 };
   for (const e of ledger) {
     const c = Number.isFinite(e.credits) ? e.credits : 0;
     const b = basisOf(e);
     if (b === 'reported') {
       s.reportedCredits += c;
       s.runsReported++;
+      if (e.kind?.startsWith('assurance:')) {
+        s.assuranceJobsReported++;
+        s.assuranceCreditsReported += c;
+      }
     } else if (b === 'estimated') {
       s.estimatedCredits += c;
       s.runsEstimated++;
@@ -166,6 +173,7 @@ export function summarizeCosts(ledger: CreditEntry[]): CostSummary {
   s.reportedCredits = Math.round(s.reportedCredits * 100) / 100;
   s.estimatedCredits = Math.round(s.estimatedCredits * 100) / 100;
   s.measuredCredits = Math.round(s.measuredCredits * 100) / 100;
+  s.assuranceCreditsReported = Math.round(s.assuranceCreditsReported * 100) / 100;
   return s;
 }
 

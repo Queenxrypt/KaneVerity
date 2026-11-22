@@ -73,6 +73,11 @@ const jobDir = (id: string, ...p: string[]) => {
   return dataPath('assurance', 'jobs', id, ...p);
 };
 
+/** A finished job's raw stdout (private; read only by orchestrator code such as B3 retrieval). */
+export function jobStdoutPath(id: string): string {
+  return jobDir(id, 'private', 'stdout.ndjson');
+}
+
 function newJobId(now = new Date()): string {
   const pad = (n: number) => String(n).padStart(2, '0');
   const d = `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}`;
@@ -217,6 +222,8 @@ export class AssuranceJobs extends EventEmitter {
         buildArgs(params);
       } else if (kind === 'list') {
         params = { kind, inferred: req.inferred === true };
+      } else if (kind === 'view' || kind === 'fsck') {
+        params = { kind };
       } else {
         params = { kind: 'cover' };
       }
@@ -457,9 +464,10 @@ export class AssuranceJobs extends EventEmitter {
         j.reason = scrub(`Kane exited with code ${r.exitCode}. ${r.stderrTail.trim().split(/\r?\n/).pop() ?? ''}`.trim());
       }
     } else {
-      // JSON listing (context list --json): outcome from the exit code only.
+      // JSON reads (context list / view / fsck --json): outcome from the exit code only.
+      // fsck exits 1 when it finds an issue; its JSON report is still read by the caller.
       j.state = r.killed ? 'interrupted' : r.exitCode === 0 ? 'complete' : r.exitCode === 2 ? 'refused' : 'error';
-      j.reason = r.exitCode === 0 ? 'Listed.' : scrub(`Kane exited with code ${r.exitCode}.`);
+      j.reason = r.exitCode === 0 ? (j.kind === 'fsck' ? 'Store checked.' : j.kind === 'view' ? 'Store view read.' : 'Listed.') : scrub(`Kane exited with code ${r.exitCode}.`);
     }
 
     if (paid) {

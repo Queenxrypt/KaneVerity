@@ -7,7 +7,7 @@
 
 import type { PendingQuestion } from './stream.ts';
 
-export type JobKind = 'ingest' | 'extract' | 'design' | 'resume' | 'list' | 'cover';
+export type JobKind = 'ingest' | 'extract' | 'design' | 'resume' | 'list' | 'cover' | 'view' | 'fsck';
 
 export interface JobKindInfo {
   kind: JobKind;
@@ -27,6 +27,9 @@ export const JOB_KINDS: Record<JobKind, JobKindInfo> = {
   resume: { kind: 'resume', label: 'Answer and resume', paid: true, writesStore: true, output: 'ndjson' },
   list: { kind: 'list', label: 'List the store', paid: false, writesStore: false, output: 'json' },
   cover: { kind: 'cover', label: 'Read coverage', paid: false, writesStore: false, output: 'ndjson' },
+  // B3 read paths (documented as local and free): the view payload and the store check.
+  view: { kind: 'view', label: 'Read the store view', paid: false, writesStore: false, output: 'json' },
+  fsck: { kind: 'fsck', label: 'Check the store', paid: false, writesStore: false, output: 'json' },
 };
 
 export function isJobKind(v: unknown): v is JobKind {
@@ -60,7 +63,9 @@ export type JobParams =
   | { kind: 'design'; useCase: string; max: number }
   | { kind: 'resume'; verb: 'extract' | 'design'; sid: string; answers: { id: string; value: string }[] }
   | { kind: 'list'; inferred: boolean }
-  | { kind: 'cover' };
+  | { kind: 'cover' }
+  | { kind: 'view' }
+  | { kind: 'fsck' };
 
 /** The exact Kane CLI arguments for a job (after `node kane-cli.cjs`). */
 export function buildArgs(p: JobParams): string[] {
@@ -89,6 +94,12 @@ export function buildArgs(p: JobParams): string[] {
       return ['context', 'list', '--json', ...(p.inferred ? ['--inferred'] : [])];
     case 'cover':
       return ['cover', '--mode', 'agent'];
+    case 'view':
+      // Documented: "--json prints the computed view payload as JSON and exit (no HTML)".
+      return ['context', 'view', '--json'];
+    case 'fsck':
+      // Documented: verifies the full record chain; exit 1 on any issue.
+      return ['context', 'fsck', '--json'];
   }
 }
 

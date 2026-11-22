@@ -183,7 +183,26 @@ KaneVerity is adopting Kane CLI's Assurance lifecycle (requirements → use case
 
 - **V0 (free):** the API-key requirements landed in a local Assurance store (`data/assurance/workspace/.context/`), 0 credits.
 - **V1 (paid, approved once):** Kane extracted one use case, "Generate an API key", from those requirements through the KaneVerity runner, for **4.83 credits** (Kane-reported, matching the balance difference). It is **unreviewed**: nothing was approved. Its citations trace every documented expected outcome back to the documentation lines; the documented steps are named correctly but not cited, so step coverage still depends on KaneVerity's own fidelity check. Assurance mode was switched back to `off` right after.
-- Next: review of use cases (B3), then test design (V2), each with its own approval.
+**B3 (built): use-case review in KaneVerity.** On the Verification material page, **Read use cases from Kane (free)** runs three free, read-only Kane commands through the runner (`context fsck --json`, `context list --json --inferred`, `context view --json`). It needs Assurance mode `free` or `all`. KaneVerity also reads the committed store records, because citation quotes are only there. The retrieval is accepted only when every cross-check agrees:
+
+- the store check passes, and its record count matches;
+- the store was written by the pinned Kane 0.10.5, with an unbroken commit chain;
+- the source blob is byte-identical to a stored requirements version;
+- each use case's title, trust, anchors and criteria agree between the commands and the records.
+
+Each retrieval is saved append-only under `data/assurance/usecases/<tutorialId>/`. Kane's store is never written.
+
+- **Citations are checked**, not trusted: each anchor must be in range, its quote must be on the cited requirements lines, and it must name the right source and version. Valid citations are traced through the line map to documentation `file:line`. Uncited steps and outcomes are shown as **NOT CITED** and are never treated as verified.
+- **Review is KaneVerity's own.** Approve, or reject with a reason, from the page. Decisions are stored append-only in `data/assurance/reviews/<tutorialId>.json`, per exact use-case version. Approving with citation gaps needs an explicit acknowledgement. Kane's own auto-recorded "skipped" verdict (attributed to `human:owner`) is shown for information and never counts.
+- **States:** derived by Kane → awaiting your review → approved / rejected (Kane's `trusted` is shown separately and never counts). A use case can go to test design only when it is approved in KaneVerity, its retrieval passed the integrity checks, it is in the latest retrieval, and its requirements are still current. Test design itself is B4 and not built.
+- The actual V1 use case `uc-1` reads cleanly, with 6/6 citations valid, 3/3 outcomes cited, 0/3 steps cited, awaiting review, and not ready for test design.
+- **Limitations:**
+  - A valid citation proves only where Kane's text came from, not that the application behaves that way. That still needs a Kane run.
+  - The record format KaneVerity reads is not documented by Kane. It is accepted only exactly as validated on 0.10.5, and anything else fails the integrity checks.
+  - KaneVerity decisions are not written to Kane's store, so Kane still lists `uc-1` as `derived`. How approvals reach test design is the B4 decision.
+  - Reading needs Assurance mode `free`. Reviewing works in any mode, from the last saved retrieval.
+
+- Next: B4 (test design, V2), with its own approval.
 
 ## Correction loop: Claude review and independent Kane retest
 

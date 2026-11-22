@@ -104,7 +104,7 @@ test('status, gating and confirmation', async () => {
   const st = await j(await fetch(`${api}/api/assurance/status`));
   assert.equal(st.mode, 'all');
   assert.equal(st.pinnedVersion, '0.10.5');
-  assert.deepEqual(st.kinds.map((k: { kind: string; paid: boolean }) => [k.kind, k.paid]), [['ingest', false], ['extract', true], ['design', true], ['resume', true], ['list', false], ['cover', false]]);
+  assert.deepEqual(st.kinds.map((k: { kind: string; paid: boolean }) => [k.kind, k.paid]), [['ingest', false], ['extract', true], ['design', true], ['resume', true], ['list', false], ['cover', false], ['view', false], ['fsck', false]]);
   let r = await post('/api/assurance/jobs', { kind: 'extract', tutorialId: T });
   assert.equal(r.status, 400, 'paid without confirmation');
   assert.match((await j(r)).error, /uses Kane credits/);

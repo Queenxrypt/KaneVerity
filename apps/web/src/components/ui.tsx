@@ -110,7 +110,16 @@ export function CostSummary({ health }: { health: Health | null }) {
     <div data-testid="cost-summary" className="text-sm">
       <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
         <span>
-          <span className="font-semibold">{c.reportedCredits}</span> credits used by KaneVerity's Kane runs <span className="text-slate-500">(reported by Kane for {c.runsReported} run{c.runsReported === 1 ? '' : 's'}: verifications, explorations and retests)</span>
+          <span className="font-semibold">{c.reportedCredits}</span> credits used by KaneVerity's Kane work{' '}
+          <span className="text-slate-500" data-testid="cost-breakdown">
+            (reported by Kane: {c.runsReported - c.assuranceJobsReported} browser run{c.runsReported - c.assuranceJobsReported === 1 ? '' : 's'} for verification, exploration and retest
+            {c.assuranceJobsReported > 0 && (
+              <>
+                , and {c.assuranceJobsReported} Kane Assurance job{c.assuranceJobsReported === 1 ? '' : 's'} ({c.assuranceCreditsReported} credits)
+              </>
+            )}
+            )
+          </span>
         </span>
         {c.runsEstimated > 0 && (
           <span className="text-review">

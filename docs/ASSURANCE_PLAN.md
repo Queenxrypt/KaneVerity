@@ -94,6 +94,10 @@ running `total_credits` that matches the balance difference; `--local` accepted 
 folder that already has a store; the `context list --json` row for a **use case**; the shape of
 `context explain --json` (history only).
 
+**[VALIDATED in B3]** (section 12.3): `context view --json` returns the full graph payload and is
+read-only; `context fsck --json` returns `{ok, issues, records}` and is read-only; citation quotes
+and claims exist only on the committed `DERIVES` edges (`props.anchor/quote/claim`), not in `view`.
+
 **[UNVERIFIED]:** the extract stream when Kane pauses with questions, crashes or holds items (V1
 completed without any of these); `receipt` and `ingested` payloads (not emitted in V1); row shapes of
 `context list --json` for AC, scenario and test rows;
@@ -139,14 +143,18 @@ Every paid step needs explicit approval with its estimate. No internal ceiling.
   contract (unknown events tolerated, missing `done` = crash); pause/answer/resume; `next[]`
   display-only; redaction; private raw streams.
 - `workspace.ts` (B2): store and `.testmuai/` location; variables file (application URL only).
-- `review.ts` (B3), `execute.ts` (B5).
+- **B3 (built):** `storeReader.ts` (strict read-only reader for the committed records), `citations.ts`
+  (citation checks and documentation tracing), `review.ts` (KaneVerity review rules and the design
+  gate), `usecases.ts` (retrieval, cross-checks, snapshots, decisions). Later: `execute.ts` (B5).
 
 ### 7.2 Data models
 - `RequirementsArtifact` (**B1**): `{tutorialId, version, docSha256, reqSha256, sourceRefs, lineMap,
   createdAt, generatorVersion}`; versions append-only.
 - `AssuranceJob` (B2): `{jobId, kind, args, state, sid, pendingQuestions, answers(by user),
   exitCode, doneStatus, credits{reported, basis}, balanceBefore/After, eventsPath(private)}`.
-- `ReviewRecord` (B3), `DesignedTest` (B4), run-record additions (B5), correction additions (B6).
+- `ReviewEntry` (**B3**): `{ucCid, decision, reason, acknowledgedGaps, gapsAtDecision, snapshot, at,
+  by: "kaneverity-review"}`, append-only per tutorial; use-case snapshots append-only per retrieval.
+- `DesignedTest` (B4), run-record additions (B5), correction additions (B6).
 
 ### 7.3 Fidelity check (the documentation as written)
 A designed test for the documented journey must keep every quoted UI label, exactly and in order;
@@ -180,7 +188,9 @@ pauses for a terminal `--apply`) -> re-design and design review -> confirmed ret
 ### 7.8 API and UI
 - `GET /api/assurance/requirements`, `GET/POST /api/assurance/requirements/:tutorialId` (**B1**).
 - `POST /api/assurance/jobs`, `GET /api/assurance/jobs/:id`, `POST .../:id/answer` (B2).
-- `GET/POST /api/assurance/review` (B3), `GET /api/assurance/coverage` (B5), `engine: 'assurance'` on runs (B5).
+- `GET /api/assurance/usecases/:tutorialId`, `POST .../retrieve` (free reads; needs mode `free` or
+  `all`), `POST .../:ucHex/review` (**B3**).
+- `GET /api/assurance/coverage` (B5), `engine: 'assurance'` on runs (B5).
 - UI: Verification material per tutorial (**B1**: requirements; later use cases, design, questions),
   coverage on runs, reconcile and design review on corrections, coverage on the Dashboard.
 
@@ -209,7 +219,7 @@ portability; unobserved event fields.
 |---|---|---|
 | **B1** | Requirements generator, line map, versioned store, stale detection, preview UI, tests | None |
 | B2 | Job runner: spawn, NDJSON parser, pause/answer loop, redaction, serialization, credit tracking; tested against a fake CLI built from the documented contract | None, then V0 |
-| B3 | Ingest, extract, use-case review | V1 |
+| **B3** | Ingest, extract, use-case review (built; review in KaneVerity only, section 12.3) | V1 |
 | B4 | Design, design review, fidelity check | V2 |
 | B5 | Execution via testrun, classification, evidence, coverage | V3, V4 |
 | B6 | Corrections: reconcile, re-design, Assurance retest, extended VERIFIED gate | V5 |
@@ -339,7 +349,7 @@ requirements line exactly. Mapped through the requirements line map:
 2. **`context explain --json` returns history only** (`target` + `entries[]`: minted, named), not
    content or citations. Use-case content and citations were read from the committed record and
    `proposal.json`. B3 needs a supported read path for content (to confirm: `context view --no-open
-   --out`, or the `proposal.json` artefact) before displaying use cases.
+   --out`, or the `proposal.json` artefact) before displaying use cases. *(Resolved in B3: section 12.3.)*
 3. **Kane auto-recorded a "skipped" review verdict** in `review.json`, attributed to
    `{"kind": "human", "id": "owner"}`, although no person reviewed anything (headless `--trust auto`).
    A skip leaves the item queued (`derived`). KaneVerity must never treat Kane's attribution as a human
@@ -347,9 +357,34 @@ requirements line exactly. Mapped through the requirements line map:
 4. **Use-case and requirements criteria are hints, not oracles** (docs): the four criteria restate
    the outcomes; acceptance criteria are minted only by design (V2).
 5. The Dashboard cost line now includes this Assurance job but still says "verifications,
-   explorations and retests": wording to correct (follow-up).
+   explorations and retests": wording to correct (follow-up). *(Fixed in B3.)*
 
 **Unchanged by V1** (fingerprinted): all 133 tracked repository files; all project data outside the
 Assurance workspace and job records except `data/credits.json`, which gained exactly one entry (the
 earlier six untouched); requirements version 1 (`b210e73c…`) and its workspace copy; the source head;
 the verified API-key correction (13 log entries, 2 attempts, 2 explorations).
+
+### 12.3 B3 retrieval findings (2026-11-22, Kane CLI 0.10.5, free commands only)
+
+- **Read path chosen:** three free, read-only commands run through the B2 runner (`context fsck
+  --json`, `context list --json --inferred`, `context view --json`), plus a strict read of the
+  committed records in `.context/commits/`. `explain` is not used (history only).
+- **`context view --json`:** `meta` (schema, `tipHash`, and the absolute `storePath`, which is
+  private and never shown), `nodes` (with trust and `contentHtml`), `edges` (with `anchors` but **no
+  quotes**), and lineage. The store fingerprint was identical before and after.
+- **`context fsck --json`:** `{"ok": true, "issues": [], "records": 2}` on the V1 store; exit 1 when
+  there are issues. Read-only.
+- **Quotes and claims** are only on the commit record's `DERIVES` edges
+  (`props: {source_id, source_cid, anchor: "Lx-Ly", quote, claim?}`). KaneVerity reads them with
+  strict schema checks and cross-checks them against `view` (anchors) and `list` (titles, source).
+- **Kane's blob id is not the requirements file's SHA-256**, so the blob bytes are compared with the
+  stored requirements version instead.
+- **Real UI check** (orchestrator in `free` mode only for this check, then back to `off`): retrieval
+  1 passed every integrity check. `uc-1` shows awaiting review, Kane trust derived, 6/6
+  citations valid (2 cite KaneVerity framing only), outcomes O1-O3 cited, and steps S1-S3 **NOT
+  CITED** (labels named exactly). Kane's "skipped" verdict is shown as never counting, and the use
+  case is not ready for test design. Nothing was approved or rejected. The credits total stayed at
+  114.81, and the store fingerprint was unchanged.
+- **Still open for B4:** whether to record KaneVerity approvals into Kane's store (`context review
+  --verdicts`, free) or design with `--allow-unreviewed` from KaneVerity-approved items only. B3
+  writes nothing to Kane.

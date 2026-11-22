@@ -1,7 +1,7 @@
 // Client for the local KaneVerity orchestrator (via the Vite /api proxy).
 // Every request carries X-KaneVerity: 1; mutating requests send JSON.
 
-import type { Discovery, FreshnessReport, Health, Project, PublicCorrection, PublicRun, RequirementsDetail, RequirementsSummary, RequirementsVersionMeta, AssuranceStatus, PublicJob, JobAnswer } from './types.ts';
+import type { Discovery, FreshnessReport, Health, Project, PublicCorrection, PublicRun, RequirementsDetail, RequirementsSummary, RequirementsVersionMeta, AssuranceStatus, PublicJob, JobAnswer, UseCasesResponse } from './types.ts';
 
 export class ApiError extends Error {
   status: number;
@@ -54,6 +54,11 @@ export const api = {
   startJob: (body: { kind: string; tutorialId?: string; confirm?: { paid: true } }) => request<PublicJob>('/assurance/jobs', { method: 'POST', body }),
   answerJob: (id: string, answers: Record<string, JobAnswer>) => request<PublicJob>(`/assurance/jobs/${encodeURIComponent(id)}/answer`, { method: 'POST', body: { answers, confirm: { paid: true } } }),
   cancelJob: (id: string) => request<PublicJob>(`/assurance/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: {} }),
+  // Assurance B3: use cases and KaneVerity's own review.
+  useCases: (tutorialId: string) => request<UseCasesResponse>(`/assurance/usecases/${encodeURIComponent(tutorialId)}`),
+  retrieveUseCases: (tutorialId: string) => request<UseCasesResponse>(`/assurance/usecases/${encodeURIComponent(tutorialId)}/retrieve`, { method: 'POST', body: {} }),
+  reviewUseCase: (tutorialId: string, cid: string, body: { decision: 'approve' | 'reject'; reason?: string; acknowledgeGaps?: boolean }) =>
+    request<UseCasesResponse>(`/assurance/usecases/${encodeURIComponent(tutorialId)}/${cid.replace(/^sha256:/, '')}/review`, { method: 'POST', body }),
   generateRequirements: (id: string) => request<{ status: 'created' | 'unchanged'; version: RequirementsVersionMeta }>(`/assurance/requirements/${encodeURIComponent(id)}`, { method: 'POST', body: {} }),
   startRuns: (tutorialIds: string[]) => request<{ runIds: string[]; estimatedCredits: number }>('/runs', { method: 'POST', body: { tutorialIds } }),
   runs: () => request<PublicRun[]>('/runs'),

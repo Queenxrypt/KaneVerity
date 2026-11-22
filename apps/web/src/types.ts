@@ -74,9 +74,49 @@ export interface RequirementsDetail {
   preview: { markdown: string; reqSha256: string; docSha256: string; lineMap: LineMapEntry[] } | null;
 }
 
+import type { CheckedCitation, CitationReport, ItemCoverage } from '../../orchestrator/src/assurance/citations.ts';
+import type { ReviewEntry, ReviewState } from '../../orchestrator/src/assurance/review.ts';
+export type { CheckedCitation, CitationReport, ItemCoverage, ReviewEntry, ReviewState };
+
+/** Assurance B3: one extracted use case with KaneVerity's review state (UI-safe). */
+export interface UseCaseView {
+  cid: string;
+  logicalId: string;
+  title: string;
+  description: string;
+  summary: string;
+  value: string;
+  risk: string;
+  actors: string[];
+  criteria: { text: string; citations: number[] }[];
+  kaneTrust: string;
+  fresh: string;
+  mintedSeq: number;
+  proposalId: string | null;
+  citationReport: CitationReport;
+  kaneVerdicts: { resolution: string; attributedTo: string; countsAsReview: false }[];
+  review: { state: ReviewState; history: ReviewEntry[] };
+  design: { eligible: boolean; reasons: string[] };
+}
+
+export interface UseCasesResponse {
+  tutorialId: string;
+  snapshot: null | {
+    snapshot: number;
+    retrievedAt: string;
+    cliVersion: string;
+    integrity: { ok: boolean; problems: string[] };
+    store: { records: number; tipPrefix: string | null };
+    fsck: { ok: boolean; issues: number };
+    requirements: { version: number; reqSha256: string; docSha256: string } | null;
+    requirementsCurrent: boolean;
+  };
+  useCases: UseCaseView[];
+}
+
 /** Assurance B2: Kane Assurance jobs (UI-safe view). */
 export type AssuranceMode = 'off' | 'free' | 'all';
-export type JobKind = 'ingest' | 'extract' | 'design' | 'resume' | 'list' | 'cover';
+export type JobKind = 'ingest' | 'extract' | 'design' | 'resume' | 'list' | 'cover' | 'view' | 'fsck';
 export type JobState = 'queued' | 'running' | 'complete' | 'paused' | 'answered' | 'refused' | 'error' | 'crashed' | 'interrupted' | 'cancelled' | 'abandoned' | 'expired';
 
 export interface AssuranceStatus {
@@ -152,6 +192,8 @@ export interface Health {
     measuredCredits: number;
     runsMeasured: number;
     runsUnknownCost: number;
+    assuranceJobsReported: number;
+    assuranceCreditsReported: number;
     pendingRuns: number;
     /** Estimated range per run kind, shown before a run. Estimates only, never limits. */
     estimatedByKind: Record<'verification' | 'exploration' | 'retest', [number, number]>;

@@ -21,6 +21,7 @@ import { CORRECTION_ID_PATTERN } from './src/correct/store.ts';
 import { EXPLORATION_MODES } from './src/correct/explore.ts';
 import { AssuranceError, RequirementsService } from './src/assurance/service.ts';
 import { AssuranceJobs, publicJob } from './src/assurance/jobs.ts';
+import { AssuranceUseCases } from './src/assurance/usecases.ts';
 import { JOB_KINDS } from './src/assurance/commands.ts';
 import { isTutorialId } from './src/assurance/store.ts';
 import { dataPath, readJson, RUN_ID_PATTERN, runDir, writeJson } from './src/store.ts';
@@ -129,7 +130,7 @@ function checkUrlPair(docsUrl: unknown, appUrl: unknown): Project {
   return { docsUrl: docsUrl.trim(), docsOrigin, appUrl: appUrl.trim(), appOrigin, savedAt: new Date().toISOString() };
 }
 
-export function createOrchestrator(runner = new Runner(), corrections = new CorrectionService(runner), requirements = new RequirementsService(), jobs = new AssuranceJobs({ requirements })): Server {
+export function createOrchestrator(runner = new Runner(), corrections = new CorrectionService(runner), requirements = new RequirementsService(), jobs = new AssuranceJobs({ requirements }), usecases = new AssuranceUseCases(jobs, requirements)): Server {
   return createServer(async (req, res) => {
     try {
       const host = (req.headers.host ?? '').toLowerCase();
@@ -319,6 +320,23 @@ export function createOrchestrator(runner = new Runner(), corrections = new Corr
           const rec =
             action === 'explore' ? await corrections.explore(id, mode) : action === 'approve' ? await corrections.approve(id) : action === 'retest' ? await corrections.retest(id) : action === 'reject' ? await corrections.reject(id) : action === 'dismiss' ? await corrections.dismiss(id) : await corrections.restore(id, body);
           return json(res, 202, publicCorrection(rec));
+        }
+      }
+
+      // Assurance B3: use cases (retrieval runs free, read-only Kane commands; review is KaneVerity's own).
+      const uMatch = /^\/api\/assurance\/usecases\/([^/]+)(?:\/(retrieve)|\/([a-f0-9]{64})\/(review))?$/.exec(p);
+      if (uMatch) {
+        const [, tutorialId, retrieve, ucHex, review] = uMatch;
+        if (method === 'GET' && !retrieve && !review) return json(res, 200, await usecases.view(tutorialId));
+        if (method === 'POST' && retrieve) {
+          await readBody(req);
+          await usecases.retrieve(tutorialId);
+          return json(res, 200, await usecases.view(tutorialId));
+        }
+        if (method === 'POST' && review) {
+          const body = await readBody(req);
+          await usecases.review(tutorialId, ucHex, body);
+          return json(res, 200, await usecases.view(tutorialId));
         }
       }
 

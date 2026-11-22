@@ -189,3 +189,14 @@ test('B2 default: Kane Assurance commands are switched off; nothing can start', 
   assert.deepEqual(await j(await get('/api/assurance/jobs')), []);
   assert.equal(existsSync(path.join(work, 'kane-args.json')), false, 'no Kane process was started');
 });
+
+test('B3 default: with Assurance off, use cases cannot be read from Kane; nothing is shown as reviewed', async () => {
+  const d = await j(await get('/api/assurance/usecases/generate-an-api-key'));
+  assert.equal(d.snapshot, null);
+  const r = await post('/api/assurance/usecases/generate-an-api-key/retrieve');
+  assert.equal(r.status, 403);
+  assert.match((await j(r)).error, /switched off/);
+  assert.equal((await post(`/api/assurance/usecases/generate-an-api-key/${'a'.repeat(64)}/review`, { decision: 'approve' })).status, 404);
+  assert.equal((await get('/api/assurance/usecases/..%2F..%2Fcredits')).status, 404);
+  assert.equal(existsSync(path.join(work, 'kane-args.json')), false, 'no Kane process was started');
+});
