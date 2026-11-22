@@ -148,6 +148,9 @@ npm run test:orchestrator   # unit, security and fake-Kane end-to-end tests (no 
 | `POST /api/discover` | Discover tutorials (sitemap and links, same origin only) |
 | `POST /api/runs` | Queue Kane runs for tutorial ids |
 | `GET /api/runs/:id` | UI-safe run record. `/events` streams it live, `/screens/<n>.jpg` serves approved screenshots, `/cancel` cancels |
+| `GET /api/assurance/requirements` | Requirements state per discovered tutorial (`none`, `current` or `stale`) |
+| `GET /api/assurance/requirements/:tutorialId` | One tutorial's requirements: state and reasons, the latest (or `?version=n`) document with its line map, every version, and a preview of what would be generated |
+| `POST /api/assurance/requirements/:tutorialId` | Generate requirements from the current documentation; a new version only if the content changed. Local and free: no Kane command runs |
 
 - **MVP scope:** live verification runs **only** against the controlled local AcmeDesk demo (`127.0.0.1:5174`) and its docs (`127.0.0.1:5175`). Arbitrary third-party documentation is **not** supported for live execution yet. Kane's instructions ask it to stay on the app, and every origin seen in the evidence is checked **after** the run. External navigation is **detected, not prevented**: Kane CLI offers no browser-domain restriction. Any unexpected origin makes a verification NEEDS REVIEW and rejects an exploration or retest.
 - **Kane receives the documentation as written:** a fixed KaneVerity rules header, then the extracted steps word for word, then one `Assert that:` line per documented expected outcome. Kane is started as `node <kane-cli.cjs> run …`, with no shell.
@@ -155,6 +158,12 @@ npm run test:orchestrator   # unit, security and fake-Kane end-to-end tests (no 
 - **Privacy:** raw Kane output, stderr and evidence packs stay in `data/runs/<id>/private/` (git-ignored, never served). The UI gets an allow-listed, scrubbed record, and a screenshot is shown only if its step was on the demo app origin.
 - **Credits:** one Kane run at a time, and every real run needs an explicit confirmation showing its estimated cost (about 12–35 credits for a verification or retest, 20–40 for an exploration; estimates only, from observed runs). There is no internal spending ceiling. Each run records its cost in `data/credits.json`: the actual cost Kane reports, a clearly labelled estimate if Kane reported none after doing agent work (for example a timeout), or 0 if Kane stopped before any agent work.
 - **API protection:** loopback only, a Host-header check, and every mutating request needs `X-KaneVerity: 1`, a JSON body and an allowed Origin. No CORS headers are sent.
+
+## Kane Assurance integration (in progress)
+
+KaneVerity is adopting Kane CLI's Assurance lifecycle (requirements → use cases → reviewed test design → execution → coverage → reconcile) as its primary verification engine. The approved architecture and phases are in [`docs/ASSURANCE_PLAN.md`](docs/ASSURANCE_PLAN.md); Kane CLI is pinned to 0.10.5.
+
+**B1 (done): requirements.** Each discovered tutorial gets a deterministic requirements document (Tutorials → **Verification material**): the documented steps and expected outcomes in order, exact labels and values, each item's documentation `file:line`, and the document fingerprint. The application address appears only as `{{app_url}}`. Versions are append-only under `data/assurance/requirements/<tutorialId>/` and become **stale** when the documentation changes. Generating runs no Kane command and uses no credits; later phases (ingest, use cases, design, execution) each need explicit approval.
 
 ## Correction loop: Claude review and independent Kane retest
 

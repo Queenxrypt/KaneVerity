@@ -10,6 +10,7 @@ import { RunDetail } from './pages/RunDetail.tsx';
 import { Corrections } from './pages/Corrections.tsx';
 import { CorrectionDetail } from './pages/CorrectionDetail.tsx';
 import { NotFound } from './pages/NotFound.tsx';
+import { VerificationMaterial } from './pages/VerificationMaterial.tsx';
 import './styles.css';
 
 const router = createBrowserRouter([
@@ -20,6 +21,7 @@ const router = createBrowserRouter([
       { index: true, element: <Dashboard /> },
       { path: 'connect', element: <Connect /> },
       { path: 'tutorials', element: <Tutorials /> },
+      { path: 'tutorials/:id/material', element: <VerificationMaterial /> },
       { path: 'runs/:runId', element: <RunDetail /> },
       { path: 'corrections', element: <Corrections /> },
       { path: 'corrections/:id', element: <CorrectionDetail /> },

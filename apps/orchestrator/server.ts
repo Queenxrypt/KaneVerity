@@ -19,6 +19,7 @@ import { Runner, publicRecord } from './src/kane/runner.ts';
 import { CorrectionError, CorrectionService, publicCorrection } from './src/correct/service.ts';
 import { CORRECTION_ID_PATTERN } from './src/correct/store.ts';
 import { EXPLORATION_MODES } from './src/correct/explore.ts';
+import { AssuranceError, RequirementsService } from './src/assurance/service.ts';
 import { dataPath, readJson, RUN_ID_PATTERN, runDir, writeJson } from './src/store.ts';
 import type { Discovery, Project } from './src/types.ts';
 import { isAllowedOrigin, originOf, UrlError } from './src/urls.ts';
@@ -125,7 +126,7 @@ function checkUrlPair(docsUrl: unknown, appUrl: unknown): Project {
   return { docsUrl: docsUrl.trim(), docsOrigin, appUrl: appUrl.trim(), appOrigin, savedAt: new Date().toISOString() };
 }
 
-export function createOrchestrator(runner = new Runner(), corrections = new CorrectionService(runner)): Server {
+export function createOrchestrator(runner = new Runner(), corrections = new CorrectionService(runner), requirements = new RequirementsService()): Server {
   return createServer(async (req, res) => {
     try {
       const host = (req.headers.host ?? '').toLowerCase();
@@ -318,9 +319,28 @@ export function createOrchestrator(runner = new Runner(), corrections = new Corr
         }
       }
 
+      // Assurance B1: requirements artefacts (generation is local and free; no Kane command runs).
+      if (method === 'GET' && p === '/api/assurance/requirements') {
+        return json(res, 200, await requirements.list());
+      }
+      const rMatch = /^\/api\/assurance\/requirements\/([^/]+)$/.exec(p);
+      if (rMatch) {
+        const id = rMatch[1];
+        if (method === 'GET') {
+          const v = url.searchParams.get('version');
+          if (v !== null && !/^[1-9][0-9]{0,5}$/.test(v)) throw new HttpError(400, 'version must be a positive whole number.');
+          return json(res, 200, await requirements.get(id, v === null ? null : Number(v)));
+        }
+        if (method === 'POST') {
+          await readBody(req);
+          const out = await requirements.generate(id);
+          return json(res, out.status === 'created' ? 201 : 200, out);
+        }
+      }
+
       throw new HttpError(404, 'Not found.');
     } catch (err) {
-      if (err instanceof HttpError || err instanceof CorrectionError) return json(res, err.status, { error: err.message });
+      if (err instanceof HttpError || err instanceof CorrectionError || err instanceof AssuranceError) return json(res, err.status, { error: err.message });
       console.error('[orchestrator] request failed:', (err as Error).message);
       return json(res, 500, { error: 'Internal error.' });
     }

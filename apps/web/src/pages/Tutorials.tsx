@@ -4,8 +4,9 @@ import { api } from '../api.ts';
 import { Card, ConfirmDialog, CostSummary, ErrorNote, FreshnessNote, RunKindBadge, SourceRef, StatusBadge, statusRuns, VerifiedBadge } from '../components/ui.tsx';
 import { tutorialStatus, type TutorialStatus } from '../../../orchestrator/src/status.ts';
 import { CorrectionBadge } from './Corrections.tsx';
+import { RequirementsBadge } from './VerificationMaterial.tsx';
 import { useHealth } from '../health.tsx';
-import type { Discovery, FreshnessReport, PublicCorrection, PublicRun, Tutorial, TutorialFreshness } from '../types.ts';
+import type { Discovery, FreshnessReport, PublicCorrection, PublicRun, RequirementsSummary, Tutorial, TutorialFreshness } from '../types.ts';
 
 function safeDocsLink(url: string, docsOrigin: string | undefined): string | null {
   try {
@@ -20,6 +21,7 @@ function TutorialCard({
   st,
   active,
   fresh,
+  req,
   docsOrigin,
   selected,
   onToggle,
@@ -29,6 +31,7 @@ function TutorialCard({
   st: TutorialStatus;
   active?: PublicRun;
   fresh?: TutorialFreshness;
+  req?: RequirementsSummary;
   docsOrigin?: string;
   selected: boolean;
   onToggle: () => void;
@@ -101,6 +104,14 @@ function TutorialCard({
             </p>
           )}
           {stale && <p className="mt-2 text-sm text-review">Cannot be verified until discovery is refreshed: {fresh?.reason}</p>}
+          <p data-testid="tutorial-material" className="mt-2 flex flex-wrap items-center gap-2 text-sm">
+            <span className="text-slate-600">Verification material:</span>
+            {req ? <RequirementsBadge state={req.state} /> : <span className="text-xs text-slate-500">not checked</span>}
+            {req?.latest && <span className="text-xs text-slate-500">requirements v{req.latest.version}</span>}
+            <Link to={`/tutorials/${encodeURIComponent(t.id)}/material`} className="font-medium text-brand hover:underline">
+              {req?.state === 'none' ? 'Preview requirements' : 'View requirements'}
+            </Link>
+          </p>
           {t.notRunnable && <p className="mt-2 text-sm text-fail">Cannot be verified: {t.notRunnable}</p>}
           {t.warnings.map((w) => (
             <p key={w} className="mt-2 text-sm text-review">
@@ -150,6 +161,7 @@ export function Tutorials() {
   const [corrections, setCorrections] = useState<PublicCorrection[]>([]);
   const [freshness, setFreshness] = useState<FreshnessReport | null>(null);
   const [freshnessError, setFreshnessError] = useState<string | null>(null);
+  const [requirements, setRequirements] = useState<RequirementsSummary[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const [confirm, setConfirm] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -170,6 +182,8 @@ export function Tutorials() {
         setFreshness(null);
         setFreshnessError((e as Error).message);
       }
+      // Requirements state is informational here; the page itself reports any error.
+      setRequirements(await api.requirementsList().catch(() => []));
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -271,6 +285,7 @@ export function Tutorials() {
                 st={tutorialStatus(t, sruns, corrections)}
                 active={activeRun(t.id)}
                 fresh={freshById.get(t.id)}
+                req={requirements.find((r) => r.tutorialId === t.id)}
                 docsOrigin={health?.project?.docsOrigin}
                 selected={selected.includes(t.id)}
                 busy={busy}

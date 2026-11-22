@@ -1,7 +1,7 @@
 // Client for the local KaneVerity orchestrator (via the Vite /api proxy).
 // Every request carries X-KaneVerity: 1; mutating requests send JSON.
 
-import type { Discovery, FreshnessReport, Health, Project, PublicCorrection, PublicRun } from './types.ts';
+import type { Discovery, FreshnessReport, Health, Project, PublicCorrection, PublicRun, RequirementsDetail, RequirementsSummary, RequirementsVersionMeta } from './types.ts';
 
 export class ApiError extends Error {
   status: number;
@@ -45,6 +45,10 @@ export const api = {
   discover: () => request<Discovery>('/discover', { method: 'POST', body: {} }),
   discovery: () => request<Discovery | null>('/discovery'),
   freshness: () => request<FreshnessReport>('/discovery/freshness'),
+  // Assurance B1: requirements (local and free; no Kane command runs).
+  requirementsList: () => request<RequirementsSummary[]>('/assurance/requirements'),
+  requirements: (id: string, version?: number) => request<RequirementsDetail>(`/assurance/requirements/${encodeURIComponent(id)}${version ? `?version=${version}` : ''}`),
+  generateRequirements: (id: string) => request<{ status: 'created' | 'unchanged'; version: RequirementsVersionMeta }>(`/assurance/requirements/${encodeURIComponent(id)}`, { method: 'POST', body: {} }),
   startRuns: (tutorialIds: string[]) => request<{ runIds: string[]; estimatedCredits: number }>('/runs', { method: 'POST', body: { tutorialIds } }),
   runs: () => request<PublicRun[]>('/runs'),
   run: (id: string) => request<PublicRun>(`/runs/${encodeURIComponent(id)}`),

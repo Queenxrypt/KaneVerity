@@ -31,6 +31,49 @@ export interface PublicCorrection {
   log: { at: string; event: string; detail: string }[];
 }
 
+import type { LineMapEntry } from '../../orchestrator/src/assurance/requirements.ts';
+export type { LineMapEntry };
+
+/** Assurance B1: one stored requirements version (metadata). */
+export interface RequirementsVersionMeta {
+  tutorialId: string;
+  version: number;
+  format: string;
+  title: string;
+  docSha256: string;
+  reqSha256: string;
+  createdAt: string;
+  supersedes: number | null;
+  file: string;
+}
+
+export type RequirementsState = 'none' | 'current' | 'stale';
+
+export interface RequirementsSummary {
+  tutorialId: string;
+  title: string;
+  state: RequirementsState;
+  reasons: string[];
+  latest: RequirementsVersionMeta | null;
+  versionCount: number;
+  freshness: 'current' | 'stale' | 'unavailable';
+}
+
+export interface RequirementsDetail {
+  tutorialId: string;
+  title: string;
+  docsUrl: string;
+  appStart: string | null;
+  state: RequirementsState;
+  reasons: string[];
+  freshness: TutorialFreshness;
+  canGenerate: boolean;
+  cannotGenerateReason: string | null;
+  versions: RequirementsVersionMeta[];
+  shown: (RequirementsVersionMeta & { lineMap: LineMapEntry[]; markdown: string; intact: boolean; isLatest: boolean }) | null;
+  preview: { markdown: string; reqSha256: string; docSha256: string; lineMap: LineMapEntry[] } | null;
+}
+
 /** Is a discovered tutorial still what the live docs page shows? */
 export interface TutorialFreshness {
   id: string;
