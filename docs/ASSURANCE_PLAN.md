@@ -83,13 +83,26 @@ Documented: the envelope, `done`, `session_paused`, the pause/answer/resume loop
 names for extract/design/reconcile/evolve/cover, testrun events and exit codes, the test-file format,
 the store layout, which commands are free.
 
-**[UNVERIFIED]:** exact payloads of `commit` / `receipt` / `ingested`; row shapes of
-`context list --json` and `explain --json`; the full `cover --json` / `gaps` documents and the
-pack's `coverage/usecases.yaml` fields; whether `design tests` keeps **exact UI labels and step
-order**; whether authored tests replay from a clean start in a fresh session; how a failing
-`step_index` maps to a documentation step; real credit costs of extract and design; whether
-testmd/testrun report credits per step; `--local` store creation without prompts on this machine;
-reconcile's ARCHIVE pause in practice; whether `--no-adaptive-heal` fully prevents re-authoring.
+**[VALIDATED by V0]** (section 12.1): `context ingest --mode ci --local` creates the local store
+without prompts on this machine and lands the file only; the `--mode ci` receipt line; the
+`context list --json` row shape for a **source** row.
+
+**[VALIDATED by V1]** (section 12.2): the `context extract --mode agent` stream for a clean
+completion (`run_start`, `corpus`, `source_start`, `agent_activity`, `usage`, `commit`, `done`); the
+`commit` payload (counts + `minted[]` + `source_id` + `proposal_id`); per-turn `usage` with a
+running `total_credits` that matches the balance difference; `--local` accepted on `extract` in a
+folder that already has a store; the `context list --json` row for a **use case**; the shape of
+`context explain --json` (history only).
+
+**[UNVERIFIED]:** the extract stream when Kane pauses with questions, crashes or holds items (V1
+completed without any of these); `receipt` and `ingested` payloads (not emitted in V1); row shapes of
+`context list --json` for AC, scenario and test rows;
+the full `cover --json` / `gaps` documents and the pack's `coverage/usecases.yaml` fields; whether
+`design tests` keeps **exact UI labels and step order**; whether authored tests replay from a clean
+start in a fresh session; how a failing `step_index` maps to a documentation step; credit costs of
+design and of larger or multi-source extractions (one small extraction cost 4.83, section 12.2);
+whether testmd/testrun report credits per step; reconcile's
+ARCHIVE pause in practice; whether `--no-adaptive-heal` fully prevents re-authoring.
 
 ## 5. Storage (decided: local store)
 
@@ -205,14 +218,138 @@ portability; unobserved event fields.
 Visual identity and UI/UX run on a separate track.
 
 ## 12. Validation runs (each needs the user's approval)
-Workspace `data/assurance/acmedesk/`, `KANE_CONTEXT_GITIGNORE=0`, API-key tutorial.
+Workspace `data/assurance/workspace/` (git-ignored), `KANE_CONTEXT_GITIGNORE=0`, API-key tutorial,
+source id `kv-generate-an-api-key`.
 
 | ID | Command | Purpose | Credits |
 |---|---|---|---|
-| V0 | `context ingest req-generate-an-api-key.md --as kv-generate-an-api-key --mode ci --local`; `context list --json`; later `testrun run --dry-run` | Store creation, `--local`, real `ingested` and list shapes | Free (local store only) |
-| V1 | `context extract --mode agent --local` | Extract stream, questions, citations | Yes, unknown (measured) |
+| V0 | `context ingest requirements/generate-an-api-key.md --as kv-generate-an-api-key --mode ci --local`; `context list --json` | Store creation, `--local`, receipt and list shapes | Free. **Done 2026-11-22: passed, 0 credits** (12.1) |
+| V1 | `context extract --mode agent --local --source kv-generate-an-api-key` | Extract stream, questions, citations | **Done 2026-11-22: complete, 4.83 credits** (12.2) |
 | V2 | `design tests --use-case <uc> --mode agent --max 1` | Test file, **label fidelity**, variables | Yes, unknown |
 | V3 | `testrun run --from-context <t-id> --agent --headless` (corrected tutorial) | Authoring, pack, coverage YAML; expect PASSED | ~30-85 |
 | V4 | Same flow on the outdated tutorial (or Configure workspace settings) | Does Assurance catch the defect? Expect FAILED | Extract + design + authoring |
 | V5 | `maintain reconcile --from req-v2.md --source-id kv-<id> --mode agent`, then replay with `--no-adaptive-heal` | Reconcile rows, ARCHIVE pause, retest | Yes |
 | - | `cover --from <pack> --mode agent`, `cover gaps --mode agent`, `evidence validate` | Coverage and pack checks | Free |
+
+The V0 plan also listed `testrun run --dry-run`; it was left out (no designed tests exist yet) and
+moves to after V2.
+
+### 12.1 V0 results (validated 2026-11-22, Kane CLI 0.10.5)
+
+Run directly (no shell) from `data/assurance/workspace/`, stdin closed, `KANE_CONTEXT_GITIGNORE=0`.
+The input was requirements version 1 (`b210e73c…`, state current, intact).
+
+| Command | Exit | Result |
+|---|---|---|
+| `kane-cli --version` | 0 | `0.10.5` |
+| `kane-cli balance` (before / after) | 0 / 0 | `Available credits: 10965.5197` both times: **0 credits used** |
+| `context ingest requirements/generate-an-api-key.md --as kv-generate-an-api-key --mode ci --local` | 0 | Receipt `created  kv-generate-an-api-key  source sha256:6ee2d0e7…  blob sha256:55709884…`; stderr `landed 1 source(s) — run kane-cli context extract to extract them` |
+| `context list --json` | 0 | One row (below) |
+
+**Validated against the docs:** the store is created on the first ingest; `meta.json`
+(`{"schema":"assurance/context@1","canonicalizer":"v1"}`), `store.json` (lineage and instance ids,
+creation time), `commits/` (one append-only ingest commit, `created_by.build: 0.10.5`), `blobs/`
+and `derived/` exist; `--mode ci` lands only and nothing is extracted; the receipt and stderr
+guidance match the documented `--mode ci` contract. Not created yet, consistent with no
+extraction: `proposals/`, `sessions/`, `locks/`, `logs/`, `design/`, `reconcile/plans/`.
+
+**Findings to keep in mind:**
+
+1. **`context list --json` source row** (one JSON object per line, observed):
+   `{"id":"kv-generate-an-api-key","cid":"sha256:6ee2d0e7…","label":"source","title":"kv-generate-an-api-key","trust":"-","fresh":"fresh"}`.
+   A source row has `trust: "-"`. Use-case and design rows are still UNVERIFIED.
+2. **Extra ingest notice.** Before the documented receipt line, `--mode ci` printed
+   `✓ Working locally` / `this folder now has its own context store; its work stays on this machine`.
+   Receipt parsing must scan every line (B2's parser does) and never assume the receipt is first.
+3. **Undocumented `.context/intents/` directory** (one intent per write, e.g. the ingest intent with
+   its source id, blob, label and media). It is Kane's internal store state: never edited, merged or
+   relied on by KaneVerity.
+4. **Kane's blob id is not the requirements SHA-256.** The stored blob is byte-identical to
+   requirements v1, but its id is `sha256:55709884…` while the file's SHA-256 is `b210e73c…`
+   (the canonicalizer applies). KaneVerity must compare **content** (or its own fingerprints), never
+   Kane's internal ids against KaneVerity fingerprints.
+5. **Kane-managed profile state outside the project.** Kane also wrote under `~/.testmuai/kaneai/`:
+   `assurance/bindings.json` (the binding of this folder to its store), a manifest for this store's
+   instance (`assurance/ctx-<instance id>/manifest.ndjson`), `assurance/no-context/manifest.ndjson`,
+   `assurance/identity-prod.json` and a TLS certificate file. This is Kane's own profile state:
+   KaneVerity never reads its account files, never edits or deletes it, and treats it as outside the
+   project. Consequence: deleting the workspace alone may leave Kane's binding record behind; any
+   clean-up of profile state is the user's decision, done with Kane's own commands.
+6. Kane offered an upgrade (0.10.5 → 0.10.7) and its agent skill; neither was installed (version pin).
+
+Unchanged by V0 (fingerprinted before and after): all 133 tracked repository files, `.gitignore`,
+all 187 project data files outside the workspace (run evidence, correction data, requirements,
+credit ledger). No personal data in the store.
+
+### 12.2 V1 results (validated 2026-11-22, Kane CLI 0.10.5)
+
+**Preceded by a free landing through the runner** (orchestrator in `free` mode): job
+`j20261122-143953-4bb934`, `context ingest requirements/generate-an-api-key.md --as kv-generate-an-api-key --mode ci --local`,
+exit 0, receipt `unchanged  kv-generate-an-api-key  source sha256:6ee2d0e7…  blob sha256:55709884…`
+(no "Working locally" notice and no stderr line on an unchanged landing), store byte-for-byte
+unchanged, 0 credits. This gave the runner the landing record it requires before extract.
+
+**The approved extraction** (orchestrator in `all` mode only for this job, returned to `off`
+immediately after): job `j20261122-150605-508b2c`, started once from the Verification material
+page with the paid confirmation.
+
+- Command (B2 runner, `--local` kept): `kane-cli context extract --mode agent --local --source kv-generate-an-api-key`,
+  run in `data/assurance/workspace/` with no terminal and `KANE_CONTEXT_GITIGNORE=0`.
+- Lifecycle: queued → running (15:06:05Z) → complete (15:06:47Z, ~42 s). Exit 0, `done{status: "complete", exit_code: 0}`.
+  No pause, no questions, no warnings, no errors, nothing held, no unknown event types, no non-JSON
+  lines, empty stderr. `--local` was accepted on a folder that already had a store.
+- Stream (20 NDJSON lines): `run_start` (trace path and support id, kept private) → `corpus`
+  (1 source) → `source_start` (`resumed: false`) → `agent_activity` (tool and decision labels) →
+  `usage` 3.75 → `usage` 1.08 (`total_credits` 4.83) → `commit` → `done`. **Not emitted**, unlike the
+  documented example: `session_complete` and `receipt`. The runner depends on neither.
+- `commit` payload: `{source_id, proposal_id: "20261122T150616-kv-generate-an-api-key", trusted: 0, derived: 1, archived: 0, superseded: 0, assumed: 0, evidence_matched: 0, minted: [{cid, logical_id: "uc-1"}]}`.
+- **Cost: 4.83 credits, reported by Kane**, and matched by the balance difference
+  (10965.5197 → 10960.6855 = 4.8342). Ledger entry `{basis: "reported", kind: "assurance:extract"}`.
+
+**Store changes** (all inside the workspace): `commits/000002-…` (one use-case node and six
+`DERIVES` edges from the source), `derived/` caches (`index.json`, a node file for `uc-1`), a new
+`intents/` entry, and `proposals/20261122T150616-kv-generate-an-api-key/` (`proposal.json`,
+`review.json`). Not created: `sessions/`, `locks/` (transient), `logs/` (the trace is outside the
+store), `signals.ndjson`. The source head is unchanged (`sha256:6ee2d0e7…`).
+
+**The use case `uc-1` "Generate an API key"** (read with free commands and from the committed
+record): risk high; actor "application user"; description and four criteria that name the
+documented labels exactly and in order ('Developer Settings', 'API Keys', 'Generate Key') and the
+three documented outcomes. `trust: "derived"` (unreviewed): `context list --json --inferred` lists it,
+and nothing was approved.
+
+**Citations** (each a `DERIVES` edge with `anchor` and `quote`): every quote matches the cited
+requirements line exactly. Mapped through the requirements line map:
+
+| Anchor | Quote | Requirements item | Documentation |
+|---|---|---|---|
+| L23 | the use-case sentence | KaneVerity framing | (no documentation line) |
+| L19 (range L18-L19) | "The journey starts at {{app_url}}/ in a fresh browser session." | KaneVerity framing | (no documentation line) |
+| L37 | O1 | O1 | `tutorials/generate-an-api-key.md:24` |
+| L38 | O2 | O2 | `tutorials/generate-an-api-key.md:25` |
+| L39 (and a range L37-L39) | O3 / O2 | O3 / O2 | `:26` / `:25` |
+
+**Findings and limitations:**
+
+1. **The documented steps are not cited.** No citation points at S1-S3 (requirements lines 29-31,
+   documentation lines 18-20). The criterion "select 'Developer Settings', 'API Keys', and 'Generate
+   Key' in that order" is cited only to line 19, which contains none of those labels. The labels and
+   order are correct, but their provenance is not cited. B3/B4 must treat step coverage as **not
+   proven by citation** and check it with the fidelity check (section 7.3), not trust it.
+2. **`context explain --json` returns history only** (`target` + `entries[]`: minted, named), not
+   content or citations. Use-case content and citations were read from the committed record and
+   `proposal.json`. B3 needs a supported read path for content (to confirm: `context view --no-open
+   --out`, or the `proposal.json` artefact) before displaying use cases.
+3. **Kane auto-recorded a "skipped" review verdict** in `review.json`, attributed to
+   `{"kind": "human", "id": "owner"}`, although no person reviewed anything (headless `--trust auto`).
+   A skip leaves the item queued (`derived`). KaneVerity must never treat Kane's attribution as a human
+   decision; approvals come only from KaneVerity's own recorded review.
+4. **Use-case and requirements criteria are hints, not oracles** (docs): the four criteria restate
+   the outcomes; acceptance criteria are minted only by design (V2).
+5. The Dashboard cost line now includes this Assurance job but still says "verifications,
+   explorations and retests": wording to correct (follow-up).
+
+**Unchanged by V1** (fingerprinted): all 133 tracked repository files; all project data outside the
+Assurance workspace and job records except `data/credits.json`, which gained exactly one entry (the
+earlier six untouched); requirements version 1 (`b210e73c…`) and its workspace copy; the source head;
+the verified API-key correction (13 log entries, 2 attempts, 2 explorations).

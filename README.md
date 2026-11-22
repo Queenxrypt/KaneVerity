@@ -179,6 +179,12 @@ KaneVerity is adopting Kane CLI's Assurance lifecycle (requirements → use case
 - **Recovery:** timeouts and cancels stop the process; a job running when the orchestrator stopped is marked interrupted and never retried. Expired sessions can't be answered.
 - **Privacy:** raw Kane output stays in `data/assurance/jobs/<id>/private/`; the UI gets a scrubbed, leak-checked view.
 
+**Validation runs so far** (details in [`docs/ASSURANCE_PLAN.md`](docs/ASSURANCE_PLAN.md) section 12):
+
+- **V0 (free):** the API-key requirements landed in a local Assurance store (`data/assurance/workspace/.context/`), 0 credits.
+- **V1 (paid, approved once):** Kane extracted one use case, "Generate an API key", from those requirements through the KaneVerity runner, for **4.83 credits** (Kane-reported, matching the balance difference). It is **unreviewed**: nothing was approved. Its citations trace every documented expected outcome back to the documentation lines; the documented steps are named correctly but not cited, so step coverage still depends on KaneVerity's own fidelity check. Assurance mode was switched back to `off` right after.
+- Next: review of use cases (B3), then test design (V2), each with its own approval.
+
 ## Correction loop: Claude review and independent Kane retest
 
 A FAILED run with a confirmed documentation defect can start a correction (Run page, **Propose correction**):
