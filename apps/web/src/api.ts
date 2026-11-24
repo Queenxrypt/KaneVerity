@@ -59,6 +59,8 @@ export const api = {
   retrieveUseCases: (tutorialId: string) => request<UseCasesResponse>(`/assurance/usecases/${encodeURIComponent(tutorialId)}/retrieve`, { method: 'POST', body: {} }),
   reviewUseCase: (tutorialId: string, cid: string, body: { decision: 'approve' | 'reject'; reason?: string; acknowledgeGaps?: boolean }) =>
     request<UseCasesResponse>(`/assurance/usecases/${encodeURIComponent(tutorialId)}/${cid.replace(/^sha256:/, '')}/review`, { method: 'POST', body }),
+  kaneWrite: (tutorialId: string, cid: string) => request<UseCasesResponse>(`/assurance/usecases/${encodeURIComponent(tutorialId)}/${cid.replace(/^sha256:/, '')}/kane-write`, { method: 'POST', body: {} }),
+  reconcileKaneWrite: (tutorialId: string, cid: string) => request<UseCasesResponse>(`/assurance/usecases/${encodeURIComponent(tutorialId)}/${cid.replace(/^sha256:/, '')}/reconcile`, { method: 'POST', body: {} }),
   generateRequirements: (id: string) => request<{ status: 'created' | 'unchanged'; version: RequirementsVersionMeta }>(`/assurance/requirements/${encodeURIComponent(id)}`, { method: 'POST', body: {} }),
   startRuns: (tutorialIds: string[]) => request<{ runIds: string[]; estimatedCredits: number }>('/runs', { method: 'POST', body: { tutorialIds } }),
   runs: () => request<PublicRun[]>('/runs'),

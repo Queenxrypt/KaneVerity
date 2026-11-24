@@ -23,7 +23,7 @@ import { config } from '../config.ts';
 import { kaneLock, type KaneLock } from '../kane/lock.ts';
 import { addCredits, dataPath, readJson, writeJson, type CostBasis } from '../store.ts';
 import { findLeaks, scrub, scrubDeep } from '../verify/redact.ts';
-import { buildArgs, CommandError, isJobKind, JOB_KINDS, parseBalance, parseIngestReceipt, requirementsFileFor, validateAnswers, type JobKind, type JobParams } from './commands.ts';
+import { buildArgs, CommandError, isJobKind, JOB_KINDS, kaneUserFor, parseBalance, parseIngestReceipt, requirementsFileFor, validateAnswers, type JobKind, type JobParams } from './commands.ts';
 import { AssuranceError, RequirementsService } from './service.ts';
 import { isTutorialId } from './store.ts';
 import { applyAssuranceLine, emptyAssuranceStream, outcomeOf, type ParsedAssuranceStream, type PendingQuestion } from './stream.ts';
@@ -196,7 +196,7 @@ export class AssuranceJobs extends EventEmitter {
 
   /** Start a job of an allow-listed kind. */
   async start(req: StartRequest): Promise<JobRecord> {
-    if (!isJobKind(req.kind) || req.kind === 'resume') throw new AssuranceError(400, 'Unknown job kind.');
+    if (!isJobKind(req.kind) || req.kind === 'resume' || JOB_KINDS[req.kind].internal) throw new AssuranceError(400, 'Unknown job kind.');
     const kind = req.kind;
     this.gate(kind, req.confirm);
     let params: JobParams;
@@ -239,6 +239,19 @@ export class AssuranceJobs extends EventEmitter {
     return this.enqueue(kind, params, tutorialId, requirements, null);
   }
 
+  /**
+   * B4: record one KaneVerity approval in Kane's store. Called only by the approval
+   * workflow (usecases.ts), after its own checks and after it wrote the private
+   * verdict file. Free; needs Assurance mode "free" or "all".
+   */
+  async startReview(p: { tutorialId: string; writeId: string; ucCid: string; reviewer: string }): Promise<JobRecord> {
+    this.gate('review', undefined);
+    if (!isTutorialId(p.tutorialId)) throw new AssuranceError(404, 'Tutorial not found.');
+    const busy = [...this.records.values()].find((j) => j.tutorialId === p.tutorialId && (j.state === 'queued' || j.state === 'running'));
+    if (busy) throw new AssuranceError(409, `A job for this tutorial is already ${busy.state}.`);
+    return this.enqueue('review', { kind: 'review', tutorialId: p.tutorialId, writeId: p.writeId, ucCid: p.ucCid, reviewer: p.reviewer }, p.tutorialId, null, null);
+  }
+
   /** Answer a paused job's questions; starts a resume job (it uses credits). */
   async answer(id: string, body: unknown): Promise<JobRecord> {
     const parent = await this.get(id);
@@ -266,6 +279,9 @@ export class AssuranceJobs extends EventEmitter {
 
   async cancel(id: string): Promise<JobRecord> {
     const j = await this.get(id);
+    // An approval write (B4) is never stopped from the jobs API: stopping it mid-write
+    // would only make its outcome unknown. It ends by itself or by the runner's timeout.
+    if (JOB_KINDS[j.kind].internal) throw new AssuranceError(409, 'This job records an approval in Kane and cannot be cancelled here.');
     if (j.state === 'queued') {
       this.queue = this.queue.filter((x) => x !== id);
       j.state = 'cancelled';
@@ -352,7 +368,7 @@ export class AssuranceJobs extends EventEmitter {
   }
 
   /** Run Kane once; no shell, stdin closed (not a terminal), private output files. */
-  private run(args: string[], cwd: string, outFile: string | null, track: boolean): Promise<Spawned> {
+  private run(args: string[], cwd: string, outFile: string | null, track: boolean, extraEnv: Record<string, string> = {}): Promise<Spawned> {
     return new Promise((resolve) => {
       let stdout = '';
       let stderr = '';
@@ -360,7 +376,7 @@ export class AssuranceJobs extends EventEmitter {
       let spawnError: string | null = null;
       const child = spawn(process.execPath, [this.entry!, ...args], {
         cwd,
-        env: { ...process.env, KANE_CONTEXT_GITIGNORE: '0' },
+        env: { ...process.env, ...extraEnv, KANE_CONTEXT_GITIGNORE: '0' },
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
         shell: false,
@@ -431,7 +447,10 @@ export class AssuranceJobs extends EventEmitter {
     const paid = JOB_KINDS[j.kind].paid;
     if (paid) j.credits.balanceBefore = await this.balance(ws);
 
-    const r = await this.run(j.args, ws, jobDir(j.jobId, 'private', 'stdout.ndjson'), true);
+    // B4: Kane records the review as {kind: "human", id: $USER}; KaneVerity sets it to
+    // the self-declared reviewer ("kaneverity:<name>"). It is not proof of identity.
+    const extraEnv: Record<string, string> = j.params.kind === 'review' ? { USER: kaneUserFor(j.params.reviewer) } : {};
+    const r = await this.run(j.args, ws, jobDir(j.jobId, 'private', 'stdout.ndjson'), true, extraEnv);
     await writeFile(jobDir(j.jobId, 'private', 'stderr.log'), r.stderrTail, 'utf8');
     j.exitCode = r.exitCode;
 
@@ -467,7 +486,7 @@ export class AssuranceJobs extends EventEmitter {
       // JSON reads (context list / view / fsck --json): outcome from the exit code only.
       // fsck exits 1 when it finds an issue; its JSON report is still read by the caller.
       j.state = r.killed ? 'interrupted' : r.exitCode === 0 ? 'complete' : r.exitCode === 2 ? 'refused' : 'error';
-      j.reason = r.exitCode === 0 ? (j.kind === 'fsck' ? 'Store checked.' : j.kind === 'view' ? 'Store view read.' : 'Listed.') : scrub(`Kane exited with code ${r.exitCode}.`);
+      j.reason = r.exitCode === 0 ? (j.kind === 'fsck' ? 'Store checked.' : j.kind === 'view' ? 'Store view read.' : j.kind === 'review' ? 'Kane accepted the verdict file. KaneVerity verifies the store next.' : 'Listed.') : scrub(`Kane exited with code ${r.exitCode}.`);
     }
 
     if (paid) {

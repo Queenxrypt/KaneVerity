@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { cp, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
+import { cp, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
@@ -17,6 +17,22 @@ const REPO = path.resolve(TESTS_DIR, '..', '..', '..');
 const STORE = path.join(REPO, 'data', 'assurance', 'workspace', '.context');
 const REQ_DIR = path.join(REPO, 'data', 'assurance', 'requirements', 'generate-an-api-key');
 const present = existsSync(path.join(STORE, 'meta.json')) && existsSync(path.join(REQ_DIR, 'v0001.md'));
+// Kane 0.10.5's record 3 from the V-B4a validation (a disposable copy; never written to the real store).
+const VB4A_RECORD_3 = {
+  seq: 3,
+  prev_hash: 'sha256:3be455d75e7bfa9a789eae9b0db6809ee8af6c2711a29bde04f47939f33fae65',
+  ts: '2026-11-22T16:36:10.769Z',
+  proposal_id: null,
+  nodes: [],
+  edges: [],
+  review: [{ id: 'sha256:4d998a230cc10b0619f9695e54d82330ab62b07fcbba7b906c4f22625eda47aa', kind: 'review-item', resolution: 'approved', edit: null, reason: null, by: { kind: 'human', id: 'operator' } }],
+  supersessions: [],
+  source_head_moves: {},
+  schema_version: 'assurance/context@1',
+  parents: ['sha256:3be455d75e7bfa9a789eae9b0db6809ee8af6c2711a29bde04f47939f33fae65'],
+  intent_verb: 'review',
+  created_by: { build: '0.10.5', by: { kind: 'human', id: 'operator' } },
+};
 const sha = (b: string) => createHash('sha256').update(b).digest('hex');
 
 async function fingerprint(dir: string): Promise<string> {
@@ -73,6 +89,33 @@ test('the actual V1 store reads, passes the checks, and shows exactly the V1 fin
 
   // Kane's own "skipped" verdict is read for information only.
   assert.deepEqual(store.kaneVerdicts.map((v) => [v.resolution, v.attributedTo]), [['skipped', 'human:owner']]);
+  // B4: the real V1 store has no committed review items (uc-1 is unreviewed).
+  assert.deepEqual(store.reviews, []);
+
+  // B4: the exact record Kane 0.10.5 wrote in the V-B4a validation (on a disposable copy),
+  // appended to this copy, is read as one approval of uc-1, linked to record 2.
+  await writeFile(path.join(tmp, '.context', 'commits', '000003-c0defa5acc39.json'), JSON.stringify(VB4A_RECORD_3));
+  const s3 = await readStore(path.join(tmp, '.context'), '0.10.5');
+  assert.equal(s3.ok, true, s3.problems.join(' '));
+  assert.equal(s3.records, 3);
+  assert.equal(s3.tipPrefix, 'c0defa5acc39');
+  assert.deepEqual(s3.reviews, [
+    {
+      seq: 3,
+      recordPrefix: 'c0defa5acc39',
+      prevHash: 'sha256:3be455d75e7bfa9a789eae9b0db6809ee8af6c2711a29bde04f47939f33fae65',
+      ucCid: uc.cid,
+      resolution: 'approved',
+      by: 'human:operator',
+      reviewOnly: true,
+      itemsInRecord: 1,
+      build: '0.10.5',
+      recordHash: null, // the tip's full hash comes from `context view`
+    },
+  ]);
+  assert.equal(s3.useCases[0].cid, uc.cid, 'approval does not change the content id');
+  assert.equal(s3.useCases[0].citations.length, 6);
+  await rm(path.join(tmp, '.context', 'commits', '000003-c0defa5acc39.json'));
 
   // Tampering with the copy is detected.
   const c2 = (await readdir(path.join(tmp, '.context', 'commits'))).sort()[1];

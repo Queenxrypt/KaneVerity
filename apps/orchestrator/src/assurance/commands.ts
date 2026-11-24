@@ -7,7 +7,7 @@
 
 import type { PendingQuestion } from './stream.ts';
 
-export type JobKind = 'ingest' | 'extract' | 'design' | 'resume' | 'list' | 'cover' | 'view' | 'fsck';
+export type JobKind = 'ingest' | 'extract' | 'design' | 'resume' | 'list' | 'cover' | 'view' | 'fsck' | 'review';
 
 export interface JobKindInfo {
   kind: JobKind;
@@ -18,6 +18,8 @@ export interface JobKindInfo {
   writesStore: boolean;
   /** How the output is read. */
   output: 'ndjson' | 'text' | 'json';
+  /** Started only by KaneVerity's own workflow (B4 approval write), never from the jobs API. */
+  internal?: boolean;
 }
 
 export const JOB_KINDS: Record<JobKind, JobKindInfo> = {
@@ -30,7 +32,20 @@ export const JOB_KINDS: Record<JobKind, JobKindInfo> = {
   // B3 read paths (documented as local and free): the view payload and the store check.
   view: { kind: 'view', label: 'Read the store view', paid: false, writesStore: false, output: 'json' },
   fsck: { kind: 'fsck', label: 'Check the store', paid: false, writesStore: false, output: 'json' },
+  // B4: write one KaneVerity approval into the store (documented as free; validated in V-B4a).
+  review: { kind: 'review', label: 'Record a KaneVerity approval in Kane', paid: false, writesStore: true, output: 'json', internal: true },
 };
+
+/**
+ * Flags KaneVerity never passes to Kane: designing unreviewed use cases, archiving
+ * without a terminal, and forced redesigns. buildArgs refuses any argument list
+ * containing one of them, whatever the job.
+ */
+export const FORBIDDEN_FLAGS = ['--allow-unreviewed', '--allow-archive', '--force'] as const;
+
+/** Id of one KaneVerity approval write (its private verdict file lives under data/assurance/kane-writes/<id>/). */
+export const WRITE_ID_PATTERN = /^w[0-9]{8}-[0-9]{6}-[a-f0-9]{6}$/;
+const CONTENT_ID = /^sha256:[a-f0-9]{64}$/;
 
 export function isJobKind(v: unknown): v is JobKind {
   return typeof v === 'string' && Object.prototype.hasOwnProperty.call(JOB_KINDS, v);
@@ -65,10 +80,32 @@ export type JobParams =
   | { kind: 'list'; inferred: boolean }
   | { kind: 'cover' }
   | { kind: 'view' }
-  | { kind: 'fsck' };
+  | { kind: 'fsck' }
+  | { kind: 'review'; tutorialId: string; writeId: string; ucCid: string; reviewer: string };
 
 /** The exact Kane CLI arguments for a job (after `node kane-cli.cjs`). */
 export function buildArgs(p: JobParams): string[] {
+  const args = argsFor(p);
+  for (const a of args) if ((FORBIDDEN_FLAGS as readonly string[]).includes(a)) throw new CommandError(`KaneVerity never passes ${a} to Kane.`);
+  return args;
+}
+
+/** A reviewer name (KANEVERITY_REVIEWER): a short plain handle; no email addresses, spaces or paths. */
+export const REVIEWER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/;
+
+/** The Kane USER value for a reviewer: "kaneverity:<reviewer>" (self-declared, not authenticated). */
+export function kaneUserFor(reviewer: string): string {
+  if (!REVIEWER_PATTERN.test(reviewer)) throw new CommandError('Invalid reviewer name.');
+  return `kaneverity:${reviewer}`;
+}
+
+/** Workspace-relative path of an approval write's private verdict file. */
+export function verdictFileFor(writeId: string): string {
+  if (!WRITE_ID_PATTERN.test(writeId)) throw new CommandError('Invalid write id.');
+  return `../kane-writes/${writeId}/verdicts.json`;
+}
+
+function argsFor(p: JobParams): string[] {
   switch (p.kind) {
     case 'ingest':
       // --mode ci lands the file only: no extraction, no credits (docs).
@@ -100,6 +137,13 @@ export function buildArgs(p: JobParams): string[] {
     case 'fsck':
       // Documented: verifies the full record chain; exit 1 on any issue.
       return ['context', 'fsck', '--json'];
+    case 'review':
+      // Documented: verdicts from a file, applied all together or not at all. --mode ci
+      // never archives, whatever the flags (help). Validated on a disposable copy (V-B4a).
+      sourceIdFor(p.tutorialId);
+      if (!CONTENT_ID.test(p.ucCid)) throw new CommandError('Invalid use-case content id.');
+      kaneUserFor(p.reviewer);
+      return ['context', 'review', '--verdicts', verdictFileFor(p.writeId), '--mode', 'ci', '--json'];
   }
 }
 

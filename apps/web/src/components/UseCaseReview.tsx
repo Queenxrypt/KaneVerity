@@ -1,19 +1,65 @@
-// Use-case review (Assurance B3). Shows what Kane extracted from the requirements,
+// Use-case review (Assurance B3, B4). Shows what Kane extracted from the requirements,
 // every citation checked against the requirements and traced to the
 // documentation, which documented steps and outcomes are NOT cited, and Kane's own
 // records (for information only). Approval and rejection happen only here, as
-// explicit user actions, and only an approved use case can go to test design.
+// explicit user actions. B4: an approval is then written to Kane's store and
+// verified there; only the latest approval, verified in Kane, can go to test design.
+// The reviewer name is self-declared (KANEVERITY_REVIEWER), never authenticated.
 
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api.ts';
 import { Card, ErrorNote, formatTime } from './ui.tsx';
-import type { AssuranceStatus, CheckedCitation, ItemCoverage, ReviewState, UseCasesResponse, UseCaseView } from '../types.ts';
+import type { AssuranceStatus, CheckedCitation, ItemCoverage, KaneApprovalView, KaneWriteGroup, ReviewState, UseCasesResponse, UseCaseView } from '../types.ts';
+
+type DecisionBody = { decision: 'approve' | 'reject'; reason?: string; acknowledgeGaps?: boolean };
 
 const REVIEW_STYLE: Record<ReviewState, { label: string; cls: string }> = {
   awaiting_review: { label: 'AWAITING YOUR REVIEW', cls: 'border-review/40 bg-review-soft text-review' },
   approved: { label: 'APPROVED BY YOU', cls: 'border-pass/30 bg-pass-soft text-pass' },
   rejected: { label: 'REJECTED BY YOU', cls: 'border-fail/30 bg-fail-soft text-fail' },
 };
+
+const KANE_STYLE: Record<KaneApprovalView['state'], { label: string; cls: string }> = {
+  none: { label: 'NOT IN KANE', cls: 'border-slate-300 bg-white text-slate-600' },
+  pending: { label: 'WRITING TO KANE', cls: 'border-review/40 bg-review-soft text-review' },
+  verified: { label: 'VERIFIED IN KANE', cls: 'border-pass/30 bg-pass-soft text-pass' },
+  not_written: { label: 'NOT WRITTEN', cls: 'border-slate-300 bg-white text-slate-700' },
+  unknown: { label: 'OUTCOME UNKNOWN', cls: 'border-fail/40 bg-fail-soft text-fail' },
+  written_unverified: { label: 'IN KANE, NOT VERIFIED', cls: 'border-fail/40 bg-fail-soft text-fail' },
+};
+
+const VIA_TEXT: Record<string, string> = { write: 'written', reconcile: 'checked in the store', reuse: 'relies on an earlier verified record', startup: 'orchestrator restarted' };
+
+const STEP_TEXT: Record<KaneWriteGroup['steps'][number]['step'], string> = {
+  started: 'started',
+  kane_running: 'Kane running',
+  verified: 'verified',
+  not_written: 'not written',
+  unknown: 'outcome unknown',
+  written_unverified: 'in Kane, not verified',
+};
+
+/** One line per write: its steps in order (every logged step is shown, none twice as a separate write). */
+function WriteTrail({ w }: { w: KaneWriteGroup }) {
+  return (
+    <li className="text-slate-600" data-testid="kane-write-history">
+      Kane write <span className="font-mono text-xs">{w.writeId}</span>:{' '}
+      {w.steps.map((s, i) => (
+        <span key={i} data-testid="kane-write-step">
+          {i > 0 && ' → '}
+          {STEP_TEXT[s.step]}
+          {s.via !== 'write' ? ` (${VIA_TEXT[s.via]})` : ''} {formatTime(s.at)}
+        </span>
+      ))}
+      {w.kaneSeq !== null && (
+        <span>
+          {' '}
+          · record #{w.kaneSeq} {shortHash(w.kaneHash)}
+        </span>
+      )}
+    </li>
+  );
+}
 
 const PROBLEM_TEXT: Record<string, string> = {
   bad_anchor: 'unreadable anchor',
@@ -22,6 +68,8 @@ const PROBLEM_TEXT: Record<string, string> = {
   wrong_source: 'cites another source',
   empty_quote: 'empty quote',
 };
+
+const shortHash = (h: string | null) => (h ? `${h.slice(0, 19)}…` : '');
 
 function Badge({ children, cls, testid }: { children: string; cls: string; testid?: string }) {
   return (
@@ -88,7 +136,63 @@ function CitationsTable({ citations }: { citations: CheckedCitation[] }) {
   );
 }
 
-function ReviewForm({ uc, onDecide, busy }: { uc: UseCaseView; onDecide: (body: { decision: 'approve' | 'reject'; reason?: string; acknowledgeGaps?: boolean }) => void; busy: boolean }) {
+/** B4: the latest decision as recorded and verified in Kane's store. */
+function KaneApproval({ uc, onWrite, onReconcile, busy }: { uc: UseCaseView; onWrite: () => void; onReconcile: () => void; busy: boolean }) {
+  const k = uc.kane;
+  // An older orchestrator (before B4) sends no Kane approval data: show nothing rather than fail.
+  if (!k) return null;
+  if (uc.review.state === 'awaiting_review' && k.state === 'none' && !k.externalApproval) return null;
+  const st = KANE_STYLE[k.state];
+  return (
+    <div className="mt-3 rounded-md border border-slate-200 p-3 text-sm" data-testid="kane-approval">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs font-semibold uppercase text-slate-500">Approval in Kane</span>
+        <Badge cls={st.cls} testid="kane-write-state">{st.label}</Badge>
+        {k.via && k.via !== 'write' && <span className="text-xs text-slate-500">({VIA_TEXT[k.via]})</span>}
+      </div>
+      {k.state === 'verified' && k.kaneSeq !== null && (
+        <div className="mt-1" data-testid="kane-record">
+          <p>
+            Kane record <strong>#{k.kaneSeq}</strong>, hash <code className="break-all font-mono text-xs">{k.kaneHash}</code>
+          </p>
+          {k.kaneBy && <p className="text-xs text-slate-600">Kane recorded it as "{k.kaneBy}". Neither this nor the reviewer name proves who approved.</p>}
+        </div>
+      )}
+      {k.reason && (
+        <p className="mt-1 text-slate-700" data-testid="kane-reason">
+          {k.reason}
+        </p>
+      )}
+      {k.state === 'unknown' && <p className="mt-1 font-medium text-fail">Decisions and writes for this tutorial are locked until you check Kane's store. KaneVerity never retries this write by itself.</p>}
+      {k.externalApproval && (
+        <p className="mt-1 font-medium text-fail" data-testid="external-approval">
+          Kane holds an approval for this use case that was not made and verified through KaneVerity. It is not accepted.
+        </p>
+      )}
+      {k.trustedButRejected && (
+        <p className="mt-1 text-review" data-testid="trusted-but-rejected">
+          You rejected this use case. Kane still lists it as trusted: KaneVerity never archives use cases in Kane, and your rejection keeps it out of test design.
+        </p>
+      )}
+      {(k.canWrite || k.canReconcile) && (
+        <div className="mt-2 flex flex-wrap gap-2">
+          {k.canWrite && (
+            <button type="button" onClick={onWrite} disabled={busy} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium hover:bg-slate-50 disabled:opacity-50" data-testid="kane-write">
+              Record approval in Kane (free)
+            </button>
+          )}
+          {k.canReconcile && (
+            <button type="button" onClick={onReconcile} disabled={busy} className="rounded-md border border-fail/40 bg-white px-3 py-1.5 text-sm font-semibold text-fail hover:bg-fail-soft disabled:opacity-50" data-testid="kane-reconcile">
+              Check Kane's store
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ReviewForm({ uc, onDecide, busy, locked, reviewerOk }: { uc: UseCaseView; onDecide: (body: DecisionBody) => void; busy: boolean; locked: boolean; reviewerOk: boolean }) {
   const [reason, setReason] = useState('');
   const [ack, setAck] = useState(false);
   const gaps = uc.citationReport.summary.hasGaps;
@@ -105,18 +209,22 @@ function ReviewForm({ uc, onDecide, busy }: { uc: UseCaseView; onDecide: (body: 
         </label>
       )}
       <div className="flex flex-wrap gap-2">
-        <button type="button" disabled={busy || (gaps && !ack)} onClick={() => onDecide({ decision: 'approve', reason: reason.trim() || undefined, acknowledgeGaps: gaps ? ack : undefined })} className="rounded-md bg-pass px-3 py-1.5 text-sm font-semibold text-white hover:opacity-90 disabled:opacity-50" data-testid="approve">
+        <button type="button" disabled={busy || locked || !reviewerOk || (gaps && !ack)} onClick={() => onDecide({ decision: 'approve', reason: reason.trim() || undefined, acknowledgeGaps: gaps ? ack : undefined })} className="rounded-md bg-pass px-3 py-1.5 text-sm font-semibold text-white hover:opacity-90 disabled:opacity-50" data-testid="approve">
           Approve use case
         </button>
-        <button type="button" disabled={busy || !reason.trim()} onClick={() => onDecide({ decision: 'reject', reason: reason.trim() })} className="rounded-md border border-fail/40 bg-white px-3 py-1.5 text-sm font-semibold text-fail hover:bg-fail-soft disabled:opacity-50" data-testid="reject">
+        <button type="button" disabled={busy || locked || !reason.trim()} onClick={() => onDecide({ decision: 'reject', reason: reason.trim() })} className="rounded-md border border-fail/40 bg-white px-3 py-1.5 text-sm font-semibold text-fail hover:bg-fail-soft disabled:opacity-50" data-testid="reject">
           Reject use case
         </button>
       </div>
+      {locked && <p className="text-xs text-fail">Decisions are locked while an approval write to Kane is in progress or has an unknown outcome.</p>}
+      {!reviewerOk && <p className="text-xs text-slate-600">Approving needs KANEVERITY_REVIEWER (see above). Rejecting does not.</p>}
+      <p className="text-xs text-slate-500">Approving records your decision in KaneVerity, then writes it to Kane's store with a free command and verifies it there. A rejection stays in KaneVerity only.</p>
     </div>
   );
 }
 
-function UseCaseCard({ uc, onDecide, busy }: { uc: UseCaseView; onDecide: (cid: string, body: { decision: 'approve' | 'reject'; reason?: string; acknowledgeGaps?: boolean }) => void; busy: boolean }) {
+function UseCaseCard(props: { uc: UseCaseView; onDecide: (cid: string, body: DecisionBody) => void; onWrite: (cid: string) => void; onReconcile: (cid: string) => void; busy: boolean; locked: boolean; reviewerOk: boolean }) {
+  const { uc, onDecide, onWrite, onReconcile, busy, locked, reviewerOk } = props;
   const s = uc.citationReport.summary;
   const r = REVIEW_STYLE[uc.review.state];
   return (
@@ -128,9 +236,21 @@ function UseCaseCard({ uc, onDecide, busy }: { uc: UseCaseView; onDecide: (cid: 
         <Badge cls="border-slate-300 bg-white text-slate-600" testid="kane-trust">{`Kane: ${uc.kaneTrust}`}</Badge>
         {uc.risk && <Badge cls={uc.risk === 'high' ? 'border-fail/30 bg-fail-soft text-fail' : 'border-slate-300 bg-white text-slate-600'}>{`${uc.risk} risk`}</Badge>}
       </div>
-      <p className="mt-1 text-sm" data-testid="design-eligibility">
-        {uc.design.eligible ? <span className="font-medium text-pass">Ready for test design.</span> : <span className="text-slate-700">Not ready for test design: {uc.design.reasons.join(' ')}</span>}
-      </p>
+      <div className="mt-1 text-sm" data-testid="design-eligibility">
+        {uc.design.eligible ? (
+          <p className="font-medium text-pass">Ready for test design.</p>
+        ) : (
+          <>
+            <p className="text-slate-700">Not ready for test design:</p>
+            <ul className="list-disc pl-5 text-slate-700" data-testid="design-reasons">
+              {uc.design.reasons.map((x) => (
+                <li key={x}>{x}</li>
+              ))}
+            </ul>
+          </>
+        )}
+      </div>
+      <KaneApproval uc={uc} onWrite={() => onWrite(uc.cid)} onReconcile={() => onReconcile(uc.cid)} busy={busy} />
 
       <dl className="mt-3 grid gap-x-4 gap-y-1 text-sm sm:grid-cols-[8rem_1fr]">
         <dt className="text-slate-500">Description</dt>
@@ -182,15 +302,19 @@ function UseCaseCard({ uc, onDecide, busy }: { uc: UseCaseView; onDecide: (cid: 
         {uc.review.history.map((h, i) => (
           <li key={`k${i}`} data-testid="kaneverity-decision">
             {formatTime(h.at)}: <strong>{h.decision === 'approved' ? 'Approved' : 'Rejected'} in KaneVerity</strong>
+            {h.reviewer ? ` by ${h.reviewer} (self-declared)` : ''}
             {h.reason ? ` — ${h.reason}` : ''}
             {h.acknowledgedGaps ? ' (citation gaps acknowledged)' : ''}
           </li>
+        ))}
+        {(uc.kaneWrites ?? []).map((w) => (
+          <WriteTrail key={w.writeId} w={w} />
         ))}
         {uc.review.history.length === 0 && <li className="text-slate-600">No KaneVerity review decision yet.</li>}
       </ul>
 
       <div className="mt-4">
-        <ReviewForm key={`${uc.cid}-${uc.review.history.length}`} uc={uc} onDecide={(body) => onDecide(uc.cid, body)} busy={busy} />
+        <ReviewForm key={`${uc.cid}-${uc.review.history.length}`} uc={uc} onDecide={(body) => onDecide(uc.cid, body)} busy={busy} locked={locked} reviewerOk={reviewerOk} />
       </div>
     </article>
   );
@@ -216,33 +340,26 @@ export function UseCaseReviewPanel({ tutorialId }: { tutorialId: string }) {
     void load();
   }, [load]);
 
-  async function retrieve() {
+  async function act(fn: () => Promise<UseCasesResponse>, message: (d: UseCasesResponse) => string | null) {
     setBusy(true);
     setError(null);
     setNotice(null);
     try {
-      setData(await api.retrieveUseCases(tutorialId));
-      setNotice('Use cases read from the Assurance store (free, read-only).');
+      const d = await fn();
+      setData(d);
+      setNotice(message(d));
     } catch (e) {
       setError((e as Error).message);
+      void load();
     } finally {
       setBusy(false);
     }
   }
 
-  async function decide(cid: string, body: { decision: 'approve' | 'reject'; reason?: string; acknowledgeGaps?: boolean }) {
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      setData(await api.reviewUseCase(tutorialId, cid, body));
-      setNotice(body.decision === 'approve' ? 'Approval recorded in KaneVerity.' : 'Rejection recorded in KaneVerity.');
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
+  const retrieve = () => act(() => api.retrieveUseCases(tutorialId), () => 'Use cases read from the Assurance store (free, read-only).');
+  const decide = (cid: string, body: DecisionBody) => act(() => api.reviewUseCase(tutorialId, cid, body), (d) => `${body.decision === 'approve' ? 'Approval' : 'Rejection'} recorded in KaneVerity.${d.note ? ` ${d.note}` : ''}`);
+  const write = (cid: string) => act(() => api.kaneWrite(tutorialId, cid), (d) => d.note);
+  const reconcile = (cid: string) => act(() => api.reconcileKaneWrite(tutorialId, cid), (d) => d.note);
 
   const canRead = status?.mode === 'free' || status?.mode === 'all';
   const snap = data?.snapshot;
@@ -250,7 +367,7 @@ export function UseCaseReviewPanel({ tutorialId }: { tutorialId: string }) {
     <Card title="Use cases from Kane Assurance">
       <div data-testid="usecase-panel">
         <p className="text-sm text-slate-700">
-          Kane proposes use cases from the requirements. Each one is checked here against the requirements Kane read, traced to the documentation, and shown with what is <strong>not</strong> cited. Only your decision below approves or rejects a use case; Kane's own trust state and records never count.
+          Kane proposes use cases from the requirements. Each one is checked here against the requirements Kane read, traced to the documentation, and shown with what is <strong>not</strong> cited. Only your decision below approves or rejects a use case; Kane's own trust state and records never count. An approval goes to test design only once it is recorded in Kane and verified there.
         </p>
         <div className="mt-3 flex flex-wrap items-center gap-3">
           <button type="button" onClick={retrieve} disabled={busy || !canRead} className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50" data-testid="retrieve-usecases">
@@ -258,6 +375,22 @@ export function UseCaseReviewPanel({ tutorialId }: { tutorialId: string }) {
           </button>
           {!canRead && <span className="text-xs text-slate-500">Reading the store needs Assurance mode "free". The last retrieval is shown below.</span>}
         </div>
+        {data?.reviewer && (
+          <p className="mt-2 text-sm" data-testid="reviewer">
+            {data.reviewer.label ? (
+              <>
+                Reviewer: <strong>{data.reviewer.label}</strong> <span className="text-slate-500">(self-declared in KANEVERITY_REVIEWER, not authenticated; passed to Kane as "kaneverity:{data.reviewer.label}")</span>
+              </>
+            ) : (
+              <span className="text-review">{data.reviewer.problem}</span>
+            )}
+          </p>
+        )}
+        {data?.locked && (
+          <p className="mt-2 rounded-md border border-fail/40 bg-fail-soft p-2 text-sm text-fail" data-testid="locked">
+            {data.locked.state === 'pending' ? 'An approval is being written to Kane.' : "An approval write to Kane has an unknown outcome. Use \"Check Kane's store\" on the use case."} Decisions and writes for this tutorial are locked until then.
+          </p>
+        )}
         {notice && (
           <p className="mt-2 text-sm text-pass" role="status">
             {notice}
@@ -296,7 +429,7 @@ export function UseCaseReviewPanel({ tutorialId }: { tutorialId: string }) {
             ) : (
               <div className="mt-3 space-y-3">
                 {data.useCases.map((uc) => (
-                  <UseCaseCard key={uc.cid} uc={uc} onDecide={decide} busy={busy} />
+                  <UseCaseCard key={uc.cid} uc={uc} onDecide={decide} onWrite={write} onReconcile={reconcile} busy={busy} locked={!!data.locked} reviewerOk={!!data.reviewer?.label} />
                 ))}
               </div>
             )}

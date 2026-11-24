@@ -9,7 +9,9 @@
 //   commits/NNNNNN-<hash12>.json   append-only records with seq, prev_hash,
 //                  schema_version, created_by.build, nodes[{cid,label,content}],
 //                  edges[{type:"DERIVES", src, dst, props{source_id, source_cid,
-//                  anchor, quote, claim?}}]
+//                  anchor, quote, claim?}}],
+//                  review[{id, kind:"review-item", resolution, edit, reason, by{kind,id}}]
+//                  (review records validated on a disposable copy in V-B4a, section 12.4)
 //   blobs/<2>/<62>  source snapshots
 // Anything else is refused, never guessed. Kane's own hash verification is done by
 // `context fsck` (the canonicalizer is not documented), which the caller runs first.
@@ -50,6 +52,28 @@ export interface KaneVerdict {
   attributedTo: string;
 }
 
+/** One committed review item (a trust decision recorded in Kane's store). */
+export interface KaneReviewItem {
+  /** Sequence number of the record holding it. */
+  seq: number;
+  /** The record's full hash, from the next record's prev_hash; null for the last record (take it from `context view`). */
+  recordHash: string | null;
+  /** The 12-hex hash prefix in the record's file name. */
+  recordPrefix: string;
+  /** The record's prev_hash (the store tip it was written on). */
+  prevHash: string | null;
+  ucCid: string;
+  resolution: string;
+  /** "kind:id" as Kane recorded it. Not proof of who decided. */
+  by: string;
+  /** The record holds only review items (no new nodes, edges or supersessions). */
+  reviewOnly: boolean;
+  /** Review items in the same record. */
+  itemsInRecord: number;
+  /** The Kane build that wrote the record. */
+  build: string | null;
+}
+
 export interface StoreRead {
   ok: boolean;
   problems: string[];
@@ -60,11 +84,15 @@ export interface StoreRead {
   sources: StoreSource[];
   useCases: StoreUseCase[];
   kaneVerdicts: KaneVerdict[];
+  /** Committed review items, in record order. */
+  reviews: KaneReviewItem[];
 }
 
 const HEX64 = /^sha256:[a-f0-9]{64}$/;
 const COMMIT_FILE = /^([0-9]{6})-([a-f0-9]{12})\.json$/;
 const str = (v: unknown) => (typeof v === 'string' ? v : null);
+const RESOLUTIONS = new Set(['approved', 'edited', 'rejected', 'skipped', 'supersede']);
+const REVIEW_ITEM_KEYS = new Set(['id', 'kind', 'resolution', 'edit', 'reason', 'by', 'supersede_target']);
 
 async function readJsonFile(file: string): Promise<unknown> {
   return JSON.parse(await readFile(file, 'utf8'));
@@ -79,7 +107,7 @@ export function blobPath(storeDir: string, blob: string): string {
 
 export async function readStore(storeDir: string, pinnedBuild: string): Promise<StoreRead> {
   const problems: string[] = [];
-  const out: StoreRead = { ok: false, problems, records: 0, tipPrefix: null, builds: [], sources: [], useCases: [], kaneVerdicts: [] };
+  const out: StoreRead = { ok: false, problems, records: 0, tipPrefix: null, builds: [], sources: [], useCases: [], kaneVerdicts: [], reviews: [] };
   let meta: Record<string, unknown>;
   try {
     meta = (await readJsonFile(path.join(storeDir, 'meta.json'))) as Record<string, unknown>;
@@ -97,6 +125,8 @@ export async function readStore(storeDir: string, pinnedBuild: string): Promise<
   const edges: { src: string; dst: string; props: Record<string, unknown> }[] = [];
   let prevPrefix: string | null = null;
   const builds = new Set<string>();
+  const prevHashes = new Map<number, string | null>();
+  const found: Omit<KaneReviewItem, 'recordHash'>[] = [];
   for (let i = 0; i < files.length; i++) {
     const m = COMMIT_FILE.exec(files[i]);
     if (!m) {
@@ -119,6 +149,36 @@ export async function readStore(storeDir: string, pinnedBuild: string): Promise<
     if (build) builds.add(build);
     if (build !== pinnedBuild) problems.push(`Commit ${seq} was written by Kane ${build ?? 'unknown'}, not the pinned ${pinnedBuild}.`);
     prevPrefix = m[2];
+    prevHashes.set(seq, prev);
+
+    // Review items: exactly the shape seen on 0.10.5 (V-B4a); anything else is refused.
+    const rv = c.review;
+    if (rv !== undefined && !Array.isArray(rv)) problems.push(`Commit ${seq} has a review list in an unexpected shape.`);
+    const items: unknown[] = Array.isArray(rv) ? rv : [];
+    const reviewOnly = Array.isArray(c.nodes) && c.nodes.length === 0 && Array.isArray(c.edges) && c.edges.length === 0 && (!Array.isArray(c.supersessions) || c.supersessions.length === 0);
+    for (const it of items) {
+      const r = (it && typeof it === 'object' && !Array.isArray(it) ? it : {}) as Record<string, unknown>;
+      const by = (r.by && typeof r.by === 'object' && !Array.isArray(r.by) ? r.by : null) as Record<string, unknown> | null;
+      const id = str(r.id);
+      const shapeOk =
+        Object.keys(r).length > 0 &&
+        Object.keys(r).every((k) => REVIEW_ITEM_KEYS.has(k)) &&
+        !!id &&
+        HEX64.test(id) &&
+        r.kind === 'review-item' &&
+        typeof r.resolution === 'string' &&
+        RESOLUTIONS.has(r.resolution) &&
+        !!by &&
+        typeof by.kind === 'string' &&
+        typeof by.id === 'string' &&
+        (r.reason === undefined || r.reason === null || typeof r.reason === 'string') &&
+        (r.edit === undefined || r.edit === null || (typeof r.edit === 'object' && !Array.isArray(r.edit)));
+      if (!shapeOk || !id || !by) {
+        problems.push(`Commit ${seq} has a review entry in an unexpected shape.`);
+        continue;
+      }
+      found.push({ seq, recordPrefix: m[2], prevHash: prev, ucCid: id, resolution: r.resolution as string, by: `${by.kind as string}:${by.id as string}`, reviewOnly, itemsInRecord: items.length, build });
+    }
     for (const n of Array.isArray(c.nodes) ? c.nodes : []) {
       const node = n as Record<string, unknown>;
       const cid = str(node.cid);
@@ -141,6 +201,8 @@ export async function readStore(storeDir: string, pinnedBuild: string): Promise<
     }
   }
   out.records = files.length;
+  // A record's full hash is what the next record links to (prev_hash).
+  out.reviews = found.map((r) => ({ ...r, recordHash: prevHashes.get(r.seq + 1) ?? null }));
   out.tipPrefix = prevPrefix;
   out.builds = [...builds];
 

@@ -91,6 +91,7 @@ before(async () => {
   Object.assign(process.env, {
     KANEVERITY_DATA_DIR: path.join(work, 'data'),
     KANEVERITY_ASSURANCE_MODE: 'free',
+    KANEVERITY_REVIEWER: 'b3-reviewer',
     KANE_CLI_ENTRY: path.join(TESTS_DIR, 'fake-kane-assurance.cjs'),
     KANEVERITY_DOCS_CONTENT_DIR: contentDir,
     KANEVERITY_ALLOWED_DOCS_ORIGINS: new URL(docsUrl).origin,
@@ -175,8 +176,12 @@ test('explicit rejection and approval through the review interface', async () =>
   d = await j(await post(ucPath, { decision: 'approve', acknowledgeGaps: true, reason: 'Steps checked by the fidelity check.' }));
   const uc = d.useCases[0];
   assert.equal(uc.review.state, 'approved');
-  assert.equal(uc.design.eligible, true);
-  assert.deepEqual(uc.review.history.map((h: { decision: string; acknowledgedGaps: boolean; by: string }) => [h.decision, h.acknowledgedGaps, h.by]), [['rejected', false, 'kaneverity-review'], ['approved', true, 'kaneverity-review']]);
+  // B4: an approval alone is not enough. Here Kane already lists the use case as trusted
+  // (scripted above) without a KaneVerity-written approval, so nothing is written to Kane.
+  assert.equal(uc.design.eligible, false);
+  assert.match(uc.design.reasons.join(' '), /not been recorded in Kane/);
+  assert.match(d.note, /not through an approval KaneVerity wrote and verified/);
+  assert.deepEqual(uc.review.history.map((h: { decision: string; acknowledgedGaps: boolean; by: string; reviewer: string | null }) => [h.decision, h.acknowledgedGaps, h.by, h.reviewer]), [['rejected', false, 'kaneverity-review', 'b3-reviewer'], ['approved', true, 'kaneverity-review', 'b3-reviewer']]);
   assert.equal(uc.review.history[1].gapsAtDecision.stepsCited, 0, 'the gaps at the time are recorded with the decision');
   assert.equal((await post(`${U}/${'f'.repeat(64)}/review`, { decision: 'approve' })).status, 404);
 });
@@ -216,7 +221,9 @@ test('every retrieval is kept as an append-only snapshot', async () => {
 
 test('when the requirements change, an approved use case can no longer go to design', async () => {
   await scriptReads(await writeStore({ citeItems: ['S1', 'S2', 'S3', 'O1', 'O2', 'O3'] }));
-  assert.equal((await j(await post(`${U}/retrieve`))).useCases[0].design.eligible, true);
+  const before = (await j(await post(`${U}/retrieve`))).useCases[0];
+  assert.equal(before.review.state, 'approved');
+  assert.doesNotMatch(before.design.reasons.join(' '), /no longer the current version/);
   const file = path.join(contentDir, 'tutorials', 'generate-an-api-key.md');
   const original = await readFile(file, 'utf8');
   await writeFile(file, original.replace('3. Click **Create API Key**.', '3. Click **Make Key**.'));

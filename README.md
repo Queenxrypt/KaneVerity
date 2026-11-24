@@ -153,7 +153,11 @@ npm run test:orchestrator   # unit, security and fake-Kane end-to-end tests (no 
 | `POST /api/assurance/requirements/:tutorialId` | Generate requirements from the current documentation; a new version only if the content changed. Local and free: no Kane command runs |
 | `GET /api/assurance/status` | Whether Kane Assurance commands are switched on (`off` by default), the pinned Kane version, and which job kinds are enabled |
 | `GET/POST /api/assurance/jobs` | List jobs (`?tutorialId=`) or start an allow-listed job (`ingest`, `extract`, `design`, `list`, `cover`); paid kinds need `{"confirm": {"paid": true}}` |
-| `GET /api/assurance/jobs/:id`, `POST …/answer`, `POST …/cancel` | One job; answer a paused session's questions (validated against what Kane asked); stop, cancel or abandon |
+| `GET /api/assurance/jobs/:id`, `POST …/answer`, `POST …/cancel` | One job; answer a paused session's questions (validated against what Kane asked); stop, cancel or abandon. The internal approval-write job (`review`) cannot be started, listed as a kind, or cancelled here |
+| `GET /api/assurance/usecases/:tutorialId` | The latest use-case retrieval with citation checks, KaneVerity review state, Kane approval state, write history and design eligibility (B3, B4) |
+| `POST /api/assurance/usecases/:tutorialId/retrieve` | Read use cases from Kane with free, read-only commands (mode `free` or `all`) |
+| `POST /api/assurance/usecases/:tutorialId/:ucHex/review` | Record your decision (`approve`, or `reject` with a reason); an approval is then written to Kane and verified |
+| `POST …/:ucHex/kane-write`, `POST …/:ucHex/reconcile` | Write the latest approval to Kane again after "not written", or settle an unknown write by reading the store (never re-runs the write) |
 
 - **MVP scope:** live verification runs **only** against the controlled local AcmeDesk demo (`127.0.0.1:5174`) and its docs (`127.0.0.1:5175`). Arbitrary third-party documentation is **not** supported for live execution yet. Kane's instructions ask it to stay on the app, and every origin seen in the evidence is checked **after** the run. External navigation is **detected, not prevented**: Kane CLI offers no browser-domain restriction. Any unexpected origin makes a verification NEEDS REVIEW and rejects an exploration or retest.
 - **Kane receives the documentation as written:** a fixed KaneVerity rules header, then the extracted steps word for word, then one `Assert that:` line per documented expected outcome. Kane is started as `node <kane-cli.cjs> run …`, with no shell.
@@ -161,6 +165,10 @@ npm run test:orchestrator   # unit, security and fake-Kane end-to-end tests (no 
 - **Privacy:** raw Kane output, stderr and evidence packs stay in `data/runs/<id>/private/` (git-ignored, never served). The UI gets an allow-listed, scrubbed record, and a screenshot is shown only if its step was on the demo app origin.
 - **Credits:** one Kane run at a time, and every real run needs an explicit confirmation showing its estimated cost (about 12–35 credits for a verification or retest, 20–40 for an exploration; estimates only, from observed runs). There is no internal spending ceiling. Each run records its cost in `data/credits.json`: the actual cost Kane reports, a clearly labelled estimate if Kane reported none after doing agent work (for example a timeout), or 0 if Kane stopped before any agent work.
 - **API protection:** loopback only, a Host-header check, and every mutating request needs `X-KaneVerity: 1`, a JSON body and an allowed Origin. No CORS headers are sent.
+- **One orchestrator per data folder:** at startup the orchestrator takes `data/orchestrator.lock` (created atomically, with its process id and a random token). A second orchestrator on the same data folder, even on another port, refuses to start, because KaneVerity's review and job locks live in one process's memory.
+  - **Stale locks:** a lock left by a process that no longer exists (a crash) is taken over.
+  - **Lost locks:** the orchestrator re-checks ownership every 5 seconds and before every review-history append and Kane approval write. If the lock was removed or taken, it stops writing and exits.
+  - **Limits:** if a stale lock's process id has been reused by another program, it reads as held. Delete the file if no orchestrator is running. Orchestrators from before this change take no lock.
 
 ## Kane Assurance integration (in progress)
 
@@ -202,7 +210,36 @@ Each retrieval is saved append-only under `data/assurance/usecases/<tutorialId>/
   - KaneVerity decisions are not written to Kane's store, so Kane still lists `uc-1` as `derived`. How approvals reach test design is the B4 decision.
   - Reading needs Assurance mode `free`. Reviewing works in any mode, from the last saved retrieval.
 
-- Next: B4 (test design, V2), with its own approval.
+**B4 (built): approvals recorded in Kane and verified.** Approving a use case in KaneVerity now also writes that approval into Kane's store and checks it there. Validated first on a disposable copy of the store (V-B4a, see the plan's section 12.4).
+
+- **Reviewer name:** set `KANEVERITY_REVIEWER` (a short handle, see `.env.example`) and restart the orchestrator. It is **self-declared, not authenticated**: KaneVerity has no login, and Kane records whatever `USER` it is given. Kane receives `USER=kaneverity:<reviewer>`. Without the setting, approving is disabled; rejecting still works.
+- **The write:** one free command, `context review --verdicts <private file> --mode ci --json`, run through the job runner (mode `free` or `all`, shared Kane lock). The private verdict file holds exactly one approval for the exact use-case content id. `--mode ci` means Kane never archives anything. `--allow-unreviewed`, `--allow-archive` and `--force` are refused for every command.
+- **Before writing,** KaneVerity reads the store again and refuses if anything changed since your decision: the use-case content id, source, requirements version, store tip, or the latest decision. It also refuses if Kane already trusts the use case without a verified KaneVerity approval (approved outside KaneVerity).
+- **After writing,** KaneVerity reads the store again. The write is **verified** only when all of these hold:
+  - exactly one new review-only record approves this content id, attributed to `human:kaneverity:<reviewer>`;
+  - the record links to the previous tip and was written by Kane 0.10.5;
+  - Kane lists the use case as trusted;
+  - its content id, citations, source and requirements are unchanged;
+  - Kane's own output confirms it.
+
+  KaneVerity records the Kane record number and full hash.
+- **When it isn't clean:**
+  - nothing in the store means **not written** (a retry is allowed);
+  - a record that doesn't match exactly is **written but not verified** (never written again);
+  - anything unproven, such as a crash, timeout or orchestrator restart mid-write, is **unknown**.
+
+  An unknown write locks decisions and writes for the tutorial until you press **Check Kane's store**, which only reads the store. KaneVerity never retries an unknown write by itself.
+- **History:** decisions and every write step are append-only in `data/assurance/reviews/<tutorialId>.json`. The page shows one line per write with its steps (started, Kane running, outcome). The file is read fail-closed: if it exists but can't be read or has the wrong shape, nothing is shown as unreviewed or unlocked and nothing is written over it.
+- **Rejections** stay in KaneVerity only. Nothing is archived in Kane. A rejected use case that Kane still trusts is shown as such and kept out of test design. Re-approving relies on the same verified Kane record (Kane accepts verdicts only for items waiting for review).
+- **Design gate:** test design is allowed only when the latest KaneVerity decision is an approval and a verified Kane record backs that exact content id. Kane must also list the use case as trusted, with the retrieval intact and the requirements current. Kane's own trust or `by` field never counts on its own.
+- **The real `uc-1`** is still unreviewed. Nothing has been written to the real store.
+- **Limitations:**
+  - **Who approved is unproven.** Someone with local access could run Kane directly with `USER=kaneverity:<name>`; such a record would be accepted only through a store check after an unknown write.
+  - **History edits go undetected.** The history file is append-only in code but not tamper-evident: a hand edit isn't detected (no hash chain).
+  - **Design must re-check.** The design gate reflects the latest retrieval, so test design must read Kane's store again just before it starts.
+  - **Untested against real Kane.** The write and verification have been exercised only with a fake Kane CLI and a disposable store copy; the first real write needs a real decision on `uc-1`.
+
+- Next: test design (V2), with its own approval.
 
 ## Correction loop: Claude review and independent Kane retest
 

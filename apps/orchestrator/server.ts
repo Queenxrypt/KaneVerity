@@ -22,6 +22,7 @@ import { EXPLORATION_MODES } from './src/correct/explore.ts';
 import { AssuranceError, RequirementsService } from './src/assurance/service.ts';
 import { AssuranceJobs, publicJob } from './src/assurance/jobs.ts';
 import { AssuranceUseCases } from './src/assurance/usecases.ts';
+import { acquireInstanceLock } from './src/instanceLock.ts';
 import { JOB_KINDS } from './src/assurance/commands.ts';
 import { isTutorialId } from './src/assurance/store.ts';
 import { dataPath, readJson, RUN_ID_PATTERN, runDir, writeJson } from './src/store.ts';
@@ -323,20 +324,26 @@ export function createOrchestrator(runner = new Runner(), corrections = new Corr
         }
       }
 
-      // Assurance B3: use cases (retrieval runs free, read-only Kane commands; review is KaneVerity's own).
-      const uMatch = /^\/api\/assurance\/usecases\/([^/]+)(?:\/(retrieve)|\/([a-f0-9]{64})\/(review))?$/.exec(p);
+      // Assurance B3/B4: use cases. Retrieval runs free, read-only Kane commands; review is
+      // KaneVerity's own; an approval is then written to Kane and verified, or reconciled.
+      const uMatch = /^\/api\/assurance\/usecases\/([^/]+)(?:\/(retrieve)|\/([a-f0-9]{64})\/(review|kane-write|reconcile))?$/.exec(p);
       if (uMatch) {
-        const [, tutorialId, retrieve, ucHex, review] = uMatch;
-        if (method === 'GET' && !retrieve && !review) return json(res, 200, await usecases.view(tutorialId));
+        const [, tutorialId, retrieve, ucHex, action] = uMatch;
+        if (method === 'GET' && !retrieve && !action) return json(res, 200, await usecases.view(tutorialId));
         if (method === 'POST' && retrieve) {
           await readBody(req);
           await usecases.retrieve(tutorialId);
           return json(res, 200, await usecases.view(tutorialId));
         }
-        if (method === 'POST' && review) {
+        if (method === 'POST' && action === 'review') {
           const body = await readBody(req);
-          await usecases.review(tutorialId, ucHex, body);
-          return json(res, 200, await usecases.view(tutorialId));
+          const r = await usecases.review(tutorialId, ucHex, body);
+          return json(res, 200, await usecases.view(tutorialId, r.note));
+        }
+        if (method === 'POST' && (action === 'kane-write' || action === 'reconcile')) {
+          await readBody(req);
+          const w = action === 'kane-write' ? await usecases.writeToKane(tutorialId, ucHex) : await usecases.reconcile(tutorialId, ucHex);
+          return json(res, 200, await usecases.view(tutorialId, w.reason));
         }
       }
 
@@ -346,7 +353,7 @@ export function createOrchestrator(runner = new Runner(), corrections = new Corr
           mode: config.assurance.mode,
           pinnedVersion: config.assurance.pinnedVersion,
           kaneFound: !!config.kane.entry,
-          kinds: Object.values(JOB_KINDS).map((k) => ({ kind: k.kind, label: k.label, paid: k.paid, enabled: config.assurance.mode === 'all' || (config.assurance.mode === 'free' && !k.paid) })),
+          kinds: Object.values(JOB_KINDS).filter((k) => !k.internal).map((k) => ({ kind: k.kind, label: k.label, paid: k.paid, enabled: config.assurance.mode === 'all' || (config.assurance.mode === 'free' && !k.paid) })),
         });
       }
       if (p === '/api/assurance/jobs') {
@@ -413,10 +420,30 @@ const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPat
 if (isMain) {
   const runner = new Runner();
   trackRuns(runner);
+  // One orchestrator per data folder: in-memory locks only protect one process.
+  let instance: Awaited<ReturnType<typeof acquireInstanceLock>>;
+  try {
+    instance = await acquireInstanceLock(config.dataDir, config.port);
+  } catch (err) {
+    console.error(`[orchestrator] ${(err as Error).message}`);
+    process.exit(1);
+  }
+  process.on('exit', () => instance.releaseSync());
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK'] as const) process.on(sig, () => process.exit(0));
+  setInterval(() => {
+    if (!instance.stillMine()) {
+      console.error('[orchestrator] The data folder lock is no longer held by this orchestrator (it was removed or taken by another one). Stopping, so two orchestrators never write the same data.');
+      process.exit(1);
+    }
+  }, 5000).unref();
   const jobs = new AssuranceJobs();
   // A job that was running when the orchestrator stopped is marked interrupted (never retried).
   await jobs.init();
-  const server = createOrchestrator(runner, undefined, undefined, jobs);
+  const requirements = new RequirementsService();
+  const usecases = new AssuranceUseCases(jobs, requirements);
+  // An approval write that was pending when the orchestrator stopped becomes "unknown" (never retried).
+  await usecases.init();
+  const server = createOrchestrator(runner, undefined, requirements, jobs, usecases);
   server.on('error', (err: NodeJS.ErrnoException) => {
     console.error(err.code === 'EADDRINUSE' ? `[orchestrator] Port ${config.port} is already in use.` : `[orchestrator] ${err.message}`);
     process.exit(1);

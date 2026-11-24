@@ -95,7 +95,7 @@ test("REGRESSION: Kane's own \"skipped\" verdict attributed to the owner never c
   const kaneLike = { ...entry('approved'), by: 'human:owner' } as unknown as ReviewEntry;
   assert.equal(reviewState([kaneLike], cid).state, 'awaiting_review');
   assert.equal(reviewState([], cid).state, 'awaiting_review');
-  const e = designEligibility({ state: reviewState([kaneLike], cid).state, integrityOk: true, inLatestSnapshot: true, requirementsCurrent: true });
+  const e = designEligibility({ state: reviewState([kaneLike], cid).state, integrityOk: true, inLatestSnapshot: true, requirementsCurrent: true, kane: { state: 'none', recordInStore: false, kaneTrust: 'trusted', externalApproval: false } });
   assert.equal(e.eligible, false);
   assert.match(e.reasons.join(' '), /not been reviewed in KaneVerity/);
 });
@@ -123,8 +123,9 @@ test('decision validation: reject needs a reason; approving with gaps needs an a
   }
 });
 
-test('only an approved use case with intact, current material may go to test design', () => {
-  const ok = { state: 'approved' as const, integrityOk: true, inLatestSnapshot: true, requirementsCurrent: true };
+test('only an approved use case with intact, current material, verified in Kane, may go to test design', () => {
+  const verified = { state: 'verified' as const, recordInStore: true, kaneTrust: 'trusted', externalApproval: false };
+  const ok = { state: 'approved' as const, integrityOk: true, inLatestSnapshot: true, requirementsCurrent: true, kane: verified };
   assert.deepEqual(designEligibility(ok), { eligible: true, reasons: [] });
   for (const [change, re] of [
     [{ state: 'awaiting_review' }, /not been reviewed/],
@@ -132,6 +133,15 @@ test('only an approved use case with intact, current material may go to test des
     [{ integrityOk: false }, /integrity/],
     [{ inLatestSnapshot: false }, /latest retrieval/],
     [{ requirementsCurrent: false }, /no longer the current/],
+    // B4: the approval must be written to Kane and verified there.
+    [{ kane: { ...verified, state: 'none' } }, /not been recorded in Kane/],
+    [{ kane: { ...verified, state: 'not_written' } }, /not been recorded in Kane/],
+    [{ kane: { ...verified, state: 'pending' } }, /being written to Kane/],
+    [{ kane: { ...verified, state: 'unknown' } }, /unknown/],
+    [{ kane: { ...verified, state: 'written_unverified' } }, /could not verify/],
+    [{ kane: { ...verified, recordInStore: false } }, /not in the latest retrieval/],
+    [{ kane: { ...verified, kaneTrust: 'derived' } }, /does not list it as trusted/],
+    [{ kane: { ...verified, externalApproval: true } }, /not made and verified through KaneVerity/],
   ] as [object, RegExp][]) {
     const e = designEligibility({ ...ok, ...change });
     assert.equal(e.eligible, false, JSON.stringify(change));

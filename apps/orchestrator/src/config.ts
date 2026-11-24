@@ -4,6 +4,7 @@
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { REVIEWER_PATTERN } from './assurance/commands.ts';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = path.resolve(HERE, '..', '..', '..');
@@ -143,6 +144,21 @@ export const config: Config = {
     maxAnswerLength: 500,
   },
 };
+
+/**
+ * The reviewer name for Kane Assurance approvals (B4), from KANEVERITY_REVIEWER.
+ * It is self-declared by whoever runs KaneVerity, never authenticated: KaneVerity
+ * has no login, and Kane does not verify the USER value it records. It is read on
+ * each call (not cached), and refused unless it is a short plain handle (no email
+ * addresses, spaces or paths). Without it, nothing is written to Kane's store.
+ */
+export function reviewerSetting(): { label: string | null; problem: string | null } {
+  const raw = process.env.KANEVERITY_REVIEWER;
+  if (raw === undefined || raw.trim() === '') return { label: null, problem: 'KANEVERITY_REVIEWER is not set. Set it to your own reviewer name and restart the orchestrator; approvals stay disabled until then.' };
+  const v = raw.trim();
+  if (!REVIEWER_PATTERN.test(v)) return { label: null, problem: 'KANEVERITY_REVIEWER must be a short handle: letters, digits, ".", "_" or "-", up to 40 characters (no email addresses or spaces).' };
+  return { label: v, problem: null };
+}
 
 /** Estimated credit range for a run kind (an estimate, never a limit). */
 export function estimateRange(kind: RunKindName = 'verification'): [number, number] {

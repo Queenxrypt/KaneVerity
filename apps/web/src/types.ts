@@ -75,8 +75,48 @@ export interface RequirementsDetail {
 }
 
 import type { CheckedCitation, CitationReport, ItemCoverage } from '../../orchestrator/src/assurance/citations.ts';
-import type { ReviewEntry, ReviewState } from '../../orchestrator/src/assurance/review.ts';
-export type { CheckedCitation, CitationReport, ItemCoverage, ReviewEntry, ReviewState };
+import type { KaneWriteState, ReviewEntry, ReviewState } from '../../orchestrator/src/assurance/review.ts';
+export type { CheckedCitation, CitationReport, ItemCoverage, KaneWriteState, ReviewEntry, ReviewState };
+
+/** Assurance B4: the latest KaneVerity decision as recorded and verified in Kane. */
+export interface KaneApprovalView {
+  state: KaneWriteState | 'none';
+  writeId: string | null;
+  decisionId: string | null;
+  kaneSeq: number | null;
+  kaneHash: string | null;
+  /** What Kane recorded as "by" (compared, never proof of identity). */
+  kaneBy: string | null;
+  /** Self-declared reviewer name passed to Kane. */
+  reviewer: string | null;
+  via: 'write' | 'reconcile' | 'reuse' | 'startup' | null;
+  reason: string | null;
+  at: string | null;
+  recordInStore: boolean;
+  externalApproval: boolean;
+  trustedButRejected: boolean;
+  canWrite: boolean;
+  canReconcile: boolean;
+}
+
+/** One approval write and every step of it (the log keeps each step; nothing is merged away). */
+export interface KaneWriteGroup {
+  writeId: string;
+  decisionId: string;
+  reviewer: string;
+  /** Current state (a pending write not running now shows as unknown). */
+  state: KaneWriteState;
+  kaneSeq: number | null;
+  kaneHash: string | null;
+  steps: {
+    step: 'started' | 'kane_running' | 'verified' | 'not_written' | 'unknown' | 'written_unverified';
+    via: 'write' | 'reconcile' | 'reuse' | 'startup';
+    at: string;
+    reason: string;
+    kaneSeq: number | null;
+    kaneHash: string | null;
+  }[];
+}
 
 /** Assurance B3: one extracted use case with KaneVerity's review state (UI-safe). */
 export interface UseCaseView {
@@ -96,17 +136,26 @@ export interface UseCaseView {
   citationReport: CitationReport;
   kaneVerdicts: { resolution: string; attributedTo: string; countsAsReview: false }[];
   review: { state: ReviewState; history: ReviewEntry[] };
+  kane: KaneApprovalView;
+  kaneWrites: KaneWriteGroup[];
   design: { eligible: boolean; reasons: string[] };
 }
 
 export interface UseCasesResponse {
   tutorialId: string;
+  mode: AssuranceMode;
+  /** Self-declared reviewer (KANEVERITY_REVIEWER); never authenticated. */
+  reviewer: { label: string | null; problem: string | null; selfDeclared: true };
+  /** A write in progress or with an unknown outcome locks decisions and writes. */
+  locked: { state: string; ucCid: string } | null;
+  /** The outcome of the last action (decision, write or reconcile). */
+  note: string | null;
   snapshot: null | {
     snapshot: number;
     retrievedAt: string;
     cliVersion: string;
     integrity: { ok: boolean; problems: string[] };
-    store: { records: number; tipPrefix: string | null };
+    store: { records: number; tipPrefix: string | null; tipHash: string | null };
     fsck: { ok: boolean; issues: number };
     requirements: { version: number; reqSha256: string; docSha256: string } | null;
     requirementsCurrent: boolean;

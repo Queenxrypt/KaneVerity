@@ -220,7 +220,7 @@ portability; unobserved event fields.
 | **B1** | Requirements generator, line map, versioned store, stale detection, preview UI, tests | None |
 | B2 | Job runner: spawn, NDJSON parser, pause/answer loop, redaction, serialization, credit tracking; tested against a fake CLI built from the documented contract | None, then V0 |
 | **B3** | Ingest, extract, use-case review (built; review in KaneVerity only, section 12.3) | V1 |
-| B4 | Design, design review, fidelity check | V2 |
+| **B4** | Use-case approvals recorded in Kane and verified; extended design gate (built, section 12.4). Design, design review and the fidelity check follow with their own approval | V-B4a (free), then V2 |
 | B5 | Execution via testrun, classification, evidence, coverage | V3, V4 |
 | B6 | Corrections: reconcile, re-design, Assurance retest, extended VERIFIED gate | V5 |
 | B7 | Reporting: coverage, history, docs | None |
@@ -388,3 +388,79 @@ the verified API-key correction (13 log entries, 2 attempts, 2 explorations).
 - **Still open for B4:** whether to record KaneVerity approvals into Kane's store (`context review
   --verdicts`, free) or design with `--allow-unreviewed` from KaneVerity-approved items only. B3
   writes nothing to Kane.
+
+### 12.4 V-B4a and B4 (2026-11-22 to 2026-11-24, Kane CLI 0.10.5, free commands only)
+
+**V-B4a (disposable copy, accepted).** `context review --verdicts <file> --mode ci --json` was run
+once against a byte-identical copy of the V1 store under a git-ignored folder, with a temporary home
+folder so the real Kane profile could not change. The real store, data and profile were confirmed
+unchanged, and the copy was deleted afterwards. Validated:
+
+- The verdict file is `[{ref, resolution, reason?, edit?, supersede_target?}]`; `ref` takes a slug or
+  a content id. One line of `--json` output: `{"ref":"uc-1","cid":"sha256:…","resolution":"approved"}`.
+- The new record is review-only: `{seq, prev_hash, ts, proposal_id: null, nodes: [], edges: [],
+  review: [{id, kind: "review-item", resolution, edit: null, reason: null, by: {kind: "human", id}}],
+  supersessions: [], source_head_moves: {}, schema_version, parents, intent_verb: "review",
+  created_by: {build, by}}`. **The reason is not committed** (only the intent file keeps it).
+- `by.id` is `$USER`, or "operator" when it is unset. Kane does not verify it.
+- Trust went from `derived` to `trusted`; the content id, anchors and citations were unchanged.
+- `context fsck --json` gave `{ok: true, issues: [], records: 3}`. `context list --json` shows
+  `trusted`; `--inferred` lists only items waiting for review, so it no longer lists the use case.
+  `context view --json` reports the new tip, `commits[]` gains
+  `{kind: "review", reviewedNodeCids, trustDelta}`, and the lineage gains `{kind: "review",
+  detail: "approved"}`. Neither view nor list shows who approved or the reason.
+- Kane refuses verdicts for items not waiting for review. A rejection archives the item, which needs
+  `--allow-archive` without a terminal; `--mode ci` refuses archives. `design tests` refuses an
+  unapproved use case (`UC_UNREVIEWED`) unless `--allow-unreviewed` is given.
+- A copied store registers in the profile's `bindings.json`. Never run Kane in a copied store with the
+  real profile: a later run on the real store could rewrite its `store.json`.
+
+**B4 (built).**
+
+- **Reviewer setting:** `KANEVERITY_REVIEWER` is self-declared and passed as
+  `USER=kaneverity:<reviewer>`. Approving needs it.
+- **Reader:** `storeReader.ts` reads `review[]` items strictly (any other key, kind, resolution or
+  `by` shape fails the integrity check), with the record's `prev_hash` and its full hash taken from
+  the next record (or from `view` for the tip).
+- **The write:** `usecases.ts` writes the approval through the internal `review` job, after fresh
+  pre-write checks, then verifies it by reading the store again. Write states (append-only
+  `kane_write` entries) are pending, verified, not_written, written_unverified and unknown.
+  Unknown is never retried and locks the tutorial until reconciled by a read-only store check.
+  A pending write left by a restart becomes unknown.
+- **Design gate:** the latest KaneVerity approval, a verified Kane record for the same content id
+  still at the top of that use case's review history, Kane trust `trusted`, an intact retrieval and
+  current requirements. An approval in Kane that no KaneVerity write accounts for is reported and
+  never accepted.
+- **Rejections** stay in KaneVerity. Re-approving after a rejection relies on the earlier verified
+  record (via "reuse"); no new record is written.
+- **Tests:** 19 end-to-end B4 cases with the fake Kane CLI modelled on record 3, plus a reader test on
+  a copy of the real V1 store with the real record 3 appended.
+- **Review fixes (2026-11-24):**
+  - The review history and latest retrieval are read fail-closed (an unreadable file was
+    previously read as empty, so the next append could have erased the history and unlocked an
+    unknown write).
+  - Reconcile is refused with Assurance off, and records nothing.
+  - The internal write job cannot be cancelled from the jobs API.
+  - The history is shown as one line per write with its steps.
+  - The panel tolerates an older orchestrator's response.
+  - A controlled restart (real processes, disposable copy, fake Kane hanging mid-write) confirmed:
+    pending becomes unknown at startup, the job is marked interrupted, decisions stay locked, and
+    reconcile settles it read-only as not written. Kane's write ran once.
+- **Pre-commit review (2026-11-24):**
+  - **One orchestrator per data folder.** The per-tutorial review locks, the "write in progress"
+    refusal and the Kane process lock are in-memory, so a second orchestrator on the same data
+    folder could have appended to the same history and started concurrent writes.
+    `src/instanceLock.ts` now takes `data/orchestrator.lock` atomically at startup; a second
+    orchestrator refuses to start, and a stale lock (dead process) is taken over. Ownership is
+    re-checked every 5 seconds and before every history append and Kane write; an orchestrator
+    that lost its lock writes nothing more and exits. Tested with real orchestrator processes on
+    a temporary folder.
+  - The reviewer pattern is now defined once (`commands.ts`), shared by the setting and the Kane
+    `USER` value.
+  - `--force` is refused for every command, so a later re-design (Kane suggests
+    `design tests --force`) needs an explicit decision then.
+- **For test design (next):** the gate uses the latest retrieval. Design must read the store again
+  immediately before it starts and re-check eligibility, because Kane can change after the last
+  retrieval.
+- **Not done:** no review was written to the real store; the real `uc-1` is unreviewed. Test design
+  (V2) is not started.
