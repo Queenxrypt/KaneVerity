@@ -192,6 +192,45 @@ function KaneApproval({ uc, onWrite, onReconcile, busy }: { uc: UseCaseView; onW
   );
 }
 
+/** V2: start test design for an approved, Kane-verified use case (paid; explicit confirmation). */
+function TestDesign({ uc, mode, onDesign, busy }: { uc: UseCaseView; mode: string; onDesign: (acknowledge: string | null) => void; busy: boolean }) {
+  const [confirming, setConfirming] = useState(false);
+  const t = uc.testDesign;
+  if (!t || uc.review.state !== 'approved') return null;
+  return (
+    <div className="mt-3 rounded-md border border-slate-200 p-3 text-sm" data-testid="test-design">
+      <p className="text-xs font-semibold uppercase text-slate-500">Test design (Kane, uses credits)</p>
+      {t.latestJob && (
+        <p className="mt-1 text-slate-700" data-testid="design-latest">
+          Latest attempt: job <span className="font-mono text-xs">{t.latestJob.jobId}</span>, {t.latestJob.state}. {t.latestJob.reason} Follow it, and answer any questions from Kane, under Kane Assurance jobs above.
+        </p>
+      )}
+      {t.blockedBy && <p className="mt-1 text-slate-700">{t.blockedBy}</p>}
+      {!uc.design.eligible && <p className="mt-1 text-slate-700">Not eligible for test design (see the reasons above).</p>}
+      {uc.design.eligible && mode !== 'all' && <p className="mt-1 text-slate-700">Test design uses Kane credits, so it needs Assurance mode "all" (KANEVERITY_ASSURANCE_MODE, then restart the orchestrator).</p>}
+      {t.needsAcknowledgement && <p className="mt-1 text-review">The previous attempt (job {t.needsAcknowledgement}) ended without a known result; Kane may hold part of a design. Starting again records that you checked it.</p>}
+      {t.canStart && !confirming && (
+        <button type="button" disabled={busy} onClick={() => setConfirming(true)} className="mt-2 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium hover:bg-slate-50 disabled:opacity-50" data-testid="design-start">
+          Design tests for {uc.logicalId}…
+        </button>
+      )}
+      {confirming && (
+        <div className="mt-2 rounded-md border border-review/40 bg-review-soft p-2" data-testid="design-confirm">
+          <p>This uses Kane credits. There is no reliable estimate yet: design has not been run on this project before. KaneVerity reads the store again and starts only if this exact use case is still approved and verified in Kane. One scenario and its test are designed. Kane's questions are never answered automatically; answering them is a separate paid step.</p>
+          <div className="mt-2 flex gap-2">
+            <button type="button" disabled={busy} onClick={() => { setConfirming(false); onDesign(t.needsAcknowledgement); }} className="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-semibold text-white disabled:opacity-50" data-testid="design-confirm-start">
+              Start design (uses credits)
+            </button>
+            <button type="button" onClick={() => setConfirming(false)} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm">
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ReviewForm({ uc, onDecide, busy, locked, reviewerOk }: { uc: UseCaseView; onDecide: (body: DecisionBody) => void; busy: boolean; locked: boolean; reviewerOk: boolean }) {
   const [reason, setReason] = useState('');
   const [ack, setAck] = useState(false);
@@ -223,8 +262,8 @@ function ReviewForm({ uc, onDecide, busy, locked, reviewerOk }: { uc: UseCaseVie
   );
 }
 
-function UseCaseCard(props: { uc: UseCaseView; onDecide: (cid: string, body: DecisionBody) => void; onWrite: (cid: string) => void; onReconcile: (cid: string) => void; busy: boolean; locked: boolean; reviewerOk: boolean }) {
-  const { uc, onDecide, onWrite, onReconcile, busy, locked, reviewerOk } = props;
+function UseCaseCard(props: { uc: UseCaseView; onDecide: (cid: string, body: DecisionBody) => void; onWrite: (cid: string) => void; onReconcile: (cid: string) => void; onDesign: (cid: string, acknowledge: string | null) => void; mode: string; busy: boolean; locked: boolean; reviewerOk: boolean }) {
+  const { uc, onDecide, onWrite, onReconcile, onDesign, mode, busy, locked, reviewerOk } = props;
   const s = uc.citationReport.summary;
   const r = REVIEW_STYLE[uc.review.state];
   return (
@@ -251,6 +290,7 @@ function UseCaseCard(props: { uc: UseCaseView; onDecide: (cid: string, body: Dec
         )}
       </div>
       <KaneApproval uc={uc} onWrite={() => onWrite(uc.cid)} onReconcile={() => onReconcile(uc.cid)} busy={busy} />
+      <TestDesign uc={uc} mode={mode} onDesign={(ack) => onDesign(uc.cid, ack)} busy={busy} />
 
       <dl className="mt-3 grid gap-x-4 gap-y-1 text-sm sm:grid-cols-[8rem_1fr]">
         <dt className="text-slate-500">Description</dt>
@@ -360,6 +400,16 @@ export function UseCaseReviewPanel({ tutorialId }: { tutorialId: string }) {
   const decide = (cid: string, body: DecisionBody) => act(() => api.reviewUseCase(tutorialId, cid, body), (d) => `${body.decision === 'approve' ? 'Approval' : 'Rejection'} recorded in KaneVerity.${d.note ? ` ${d.note}` : ''}`);
   const write = (cid: string) => act(() => api.kaneWrite(tutorialId, cid), (d) => d.note);
   const reconcile = (cid: string) => act(() => api.reconcileKaneWrite(tutorialId, cid), (d) => d.note);
+  const designStart = (cid: string, acknowledge: string | null) =>
+    act(
+      async () => {
+        const job = await api.designUseCase(tutorialId, cid, { confirm: { paid: true }, max: 1, ...(acknowledge ? { acknowledgePrevious: acknowledge } : {}) });
+        setNotice(null);
+        const d = await api.useCases(tutorialId);
+        return { ...d, note: `Test design started (job ${job.jobId}). Follow it, and answer any questions from Kane, under Kane Assurance jobs above.` };
+      },
+      (d) => d.note,
+    );
 
   const canRead = status?.mode === 'free' || status?.mode === 'all';
   const snap = data?.snapshot;
@@ -429,7 +479,7 @@ export function UseCaseReviewPanel({ tutorialId }: { tutorialId: string }) {
             ) : (
               <div className="mt-3 space-y-3">
                 {data.useCases.map((uc) => (
-                  <UseCaseCard key={uc.cid} uc={uc} onDecide={decide} onWrite={write} onReconcile={reconcile} busy={busy} locked={!!data.locked} reviewerOk={!!data.reviewer?.label} />
+                  <UseCaseCard key={uc.cid} uc={uc} onDecide={decide} onWrite={write} onReconcile={reconcile} onDesign={designStart} mode={data.mode ?? 'off'} busy={busy} locked={!!data.locked} reviewerOk={!!data.reviewer?.label} />
                 ))}
               </div>
             )}

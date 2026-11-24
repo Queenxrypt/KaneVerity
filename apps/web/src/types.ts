@@ -139,6 +139,13 @@ export interface UseCaseView {
   kane: KaneApprovalView;
   kaneWrites: KaneWriteGroup[];
   design: { eligible: boolean; reasons: string[] };
+  /** V2: the latest test-design attempt and whether a new one can start (paid; mode "all"). */
+  testDesign?: {
+    latestJob: { jobId: string; kind: string; state: string; reason: string; createdAt: string } | null;
+    blockedBy: string | null;
+    needsAcknowledgement: string | null;
+    canStart: boolean;
+  };
 }
 
 export interface UseCasesResponse {

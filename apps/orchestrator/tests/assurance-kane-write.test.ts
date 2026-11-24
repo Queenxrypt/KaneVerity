@@ -525,7 +525,7 @@ test('bypass flags are never passed to Kane, and the review job cannot be starte
   const samples = [
     { kind: 'ingest', tutorialId: T },
     { kind: 'extract', tutorialId: T },
-    { kind: 'design', useCase: 'uc-generate-an-api-key', max: 2 },
+    { kind: 'design', tutorialId: T, ucCid: UC, useCase: 'uc-generate-an-api-key', max: 2, reviewer: REVIEWER, decisionId: 'd20261124-000000-aaaaaa', acknowledgedPrevious: null },
     { kind: 'resume', verb: 'design', sid: 'des-1', answers: [{ id: 'q1', value: '1' }] },
     { kind: 'list', inferred: true },
     { kind: 'cover' },

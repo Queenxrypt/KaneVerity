@@ -85,6 +85,11 @@ function newJobId(now = new Date()): string {
   return `j${d}-${t}-${Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0')}`;
 }
 
+/** A test-design job or the resume of a design session (V2). */
+export function isDesignFamily(j: JobRecord): boolean {
+  return j.params.kind === 'design' || (j.params.kind === 'resume' && j.params.verb === 'design');
+}
+
 const isExpired = (j: JobRecord, now: Date) => j.state === 'paused' && !!j.pause?.expiresAt && Date.parse(j.pause.expiresAt) < now.getTime();
 
 /** UI-safe job: allow-listed, scrubbed, leak-checked; no paths, no raw output, no balances. */
@@ -105,7 +110,7 @@ export function publicJob(j: JobRecord, now = new Date()) {
     cliVersion: j.cliVersion,
     doneStatus: j.doneStatus,
     next: j.next,
-    params: j.params.kind === 'resume' ? { kind: 'resume', verb: j.params.verb, answers: j.params.answers } : j.params,
+    params: j.params.kind === 'resume' ? { kind: 'resume', verb: j.params.verb, answers: j.params.answers, ...(j.params.ucCid ? { ucCid: j.params.ucCid } : {}) } : j.params,
     pause: j.pause && { expiresAt: j.pause.expiresAt, questions: j.pause.questions, crashed: j.pause.crashed, held: j.pause.held },
     parentJobId: j.parentJobId,
     resumedBy: j.resumedBy,
@@ -217,9 +222,6 @@ export class AssuranceJobs extends EventEmitter {
           if (!landed) throw new AssuranceError(409, 'Land the current requirements in the Assurance store first.');
         }
         params = { kind, tutorialId };
-      } else if (kind === 'design') {
-        params = { kind, useCase: String(req.useCase ?? ''), max: Number(req.max ?? 1) };
-        buildArgs(params);
       } else if (kind === 'list') {
         params = { kind, inferred: req.inferred === true };
       } else if (kind === 'view' || kind === 'fsck') {
@@ -244,6 +246,27 @@ export class AssuranceJobs extends EventEmitter {
    * workflow (usecases.ts), after its own checks and after it wrote the private
    * verdict file. Free; needs Assurance mode "free" or "all".
    */
+  /**
+   * V2: design tests for one exact use-case version. Called only by the use-case design
+   * endpoint (usecases.ts) after its fresh checks. Paid: needs Assurance mode "all" and an
+   * explicit confirmation, like every paid command. Just before Kane starts, the design
+   * preflight re-checks KaneVerity's own state (the job may have waited in the queue).
+   */
+  async startDesign(p: { tutorialId: string; ucCid: string; useCase: string; max: number; reviewer: string; decisionId: string; acknowledgedPrevious: string | null; requirements: JobRecord['requirements']; confirm: unknown }): Promise<JobRecord> {
+    this.gate('design', p.confirm);
+    if (!isTutorialId(p.tutorialId)) throw new AssuranceError(404, 'Tutorial not found.');
+    const busy = [...this.records.values()].find((j) => j.tutorialId === p.tutorialId && (j.state === 'queued' || j.state === 'running'));
+    if (busy) throw new AssuranceError(409, `A job for this tutorial is already ${busy.state}.`);
+    const params: JobParams = { kind: 'design', tutorialId: p.tutorialId, ucCid: p.ucCid, useCase: p.useCase, max: p.max, reviewer: p.reviewer, decisionId: p.decisionId, acknowledgedPrevious: p.acknowledgedPrevious };
+    return this.enqueue('design', params, p.tutorialId, p.requirements, null);
+  }
+
+  /** Set by the use-case service: a reason to refuse a design (or design resume) right before Kane starts, or null. */
+  private designPreflight: ((j: JobRecord) => Promise<string | null>) | null = null;
+  setDesignPreflight(fn: (j: JobRecord) => Promise<string | null>) {
+    this.designPreflight = fn;
+  }
+
   async startReview(p: { tutorialId: string; writeId: string; ucCid: string; reviewer: string }): Promise<JobRecord> {
     this.gate('review', undefined);
     if (!isTutorialId(p.tutorialId)) throw new AssuranceError(404, 'Tutorial not found.');
@@ -253,7 +276,12 @@ export class AssuranceJobs extends EventEmitter {
   }
 
   /** Answer a paused job's questions; starts a resume job (it uses credits). */
-  async answer(id: string, body: unknown): Promise<JobRecord> {
+  /**
+   * Answer a paused job. A test-design session (V2) is answered only through its use
+   * case's design endpoint ({internal: true}), which re-checks the use case first.
+   */
+  async answer(id: string, body: unknown, opts: { internal?: boolean } = {}): Promise<JobRecord> {
+    if (!opts.internal && isDesignFamily(await this.get(id))) throw new AssuranceError(409, "Test-design sessions are answered from their use case (POST /api/assurance/usecases/:tutorialId/:contentId/design/:jobId/answer), which re-checks the use case first.");
     const parent = await this.get(id);
     if (parent.state !== 'paused' || !parent.pause) throw new AssuranceError(409, 'Only a paused job can be answered.');
     if (isExpired(parent, new Date())) throw new AssuranceError(409, 'This Kane session has expired (sessions last 24 hours). Start again.');
@@ -268,7 +296,9 @@ export class AssuranceJobs extends EventEmitter {
       if (err instanceof CommandError) throw new AssuranceError(400, err.message);
       throw err;
     }
-    const params: JobParams = { kind: 'resume', verb, sid: parent.pause.sid, answers };
+    // A design session keeps its binding: the same use-case version, decision and reviewer.
+    const bound = parent.params.kind === 'design' ? parent.params : parent.params.kind === 'resume' && parent.params.verb === 'design' ? parent.params : null;
+    const params: JobParams = bound && verb === 'design' ? { kind: 'resume', verb, sid: parent.pause.sid, answers, ucCid: bound.ucCid, decisionId: bound.decisionId, reviewer: bound.reviewer } : { kind: 'resume', verb, sid: parent.pause.sid, answers };
     const child = await this.enqueue('resume', params, parent.tutorialId, parent.requirements, parent.jobId);
     parent.state = 'answered';
     parent.resumedBy = child.jobId;
@@ -277,11 +307,13 @@ export class AssuranceJobs extends EventEmitter {
     return child;
   }
 
-  async cancel(id: string): Promise<JobRecord> {
+  /** Stop, cancel or abandon a job. A test-design job (V2) only through its use case's design endpoint ({internal: true}). */
+  async cancel(id: string, opts: { internal?: boolean } = {}): Promise<JobRecord> {
     const j = await this.get(id);
+    if (!opts.internal && isDesignFamily(j)) throw new AssuranceError(409, 'Test-design jobs are stopped or abandoned from their use case (POST /api/assurance/usecases/:tutorialId/:contentId/design/:jobId/cancel).');
     // An approval write (B4) is never stopped from the jobs API: stopping it mid-write
     // would only make its outcome unknown. It ends by itself or by the runner's timeout.
-    if (JOB_KINDS[j.kind].internal) throw new AssuranceError(409, 'This job records an approval in Kane and cannot be cancelled here.');
+    if (JOB_KINDS[j.kind].cancellable === false) throw new AssuranceError(409, 'This job records an approval in Kane and cannot be cancelled here.');
     if (j.state === 'queued') {
       this.queue = this.queue.filter((x) => x !== id);
       j.state = 'cancelled';
@@ -400,8 +432,11 @@ export class AssuranceJobs extends EventEmitter {
       child.on('error', (e) => (spawnError = e.message));
       child.on('close', (code) => {
         clearTimeout(timer);
-        out?.end();
-        resolve({ exitCode: code, stdout, stderrTail: stderr, killed, cancelled: !!(track && this.active?.cancelled), spawnError });
+        const done = () => resolve({ exitCode: code, stdout, stderrTail: stderr, killed, cancelled: !!(track && this.active?.cancelled), spawnError });
+        // Resolve only once the private output file is fully written: retrieval reads it
+        // right after the job completes, and a partly flushed file could drop the last lines.
+        if (out) out.end(done);
+        else done();
       });
     });
   }
@@ -444,12 +479,24 @@ export class AssuranceJobs extends EventEmitter {
       await writeFile(path.join(ws, requirementsFileFor(j.params.tutorialId)), d.shown.markdown, 'utf8');
     }
 
+    // V2: a design (or design resume) re-checks KaneVerity's state right before Kane starts.
+    const isDesign = j.params.kind === 'design' || (j.params.kind === 'resume' && j.params.verb === 'design');
+    if (isDesign) {
+      const refusal = this.designPreflight ? await this.designPreflight(j) : 'the design checks are not available in this process.';
+      if (refusal) {
+        j.state = 'refused';
+        j.reason = scrub(`Not started: ${refusal} Kane's design did not start and no credits were used.`);
+        return;
+      }
+    }
+
     const paid = JOB_KINDS[j.kind].paid;
     if (paid) j.credits.balanceBefore = await this.balance(ws);
 
     // B4: Kane records the review as {kind: "human", id: $USER}; KaneVerity sets it to
     // the self-declared reviewer ("kaneverity:<name>"). It is not proof of identity.
-    const extraEnv: Record<string, string> = j.params.kind === 'review' ? { USER: kaneUserFor(j.params.reviewer) } : {};
+    const reviewerForKane = j.params.kind === 'review' || j.params.kind === 'design' ? j.params.reviewer : j.params.kind === 'resume' ? j.params.reviewer : undefined;
+    const extraEnv: Record<string, string> = reviewerForKane ? { USER: kaneUserFor(reviewerForKane) } : {};
     const r = await this.run(j.args, ws, jobDir(j.jobId, 'private', 'stdout.ndjson'), true, extraEnv);
     await writeFile(jobDir(j.jobId, 'private', 'stderr.log'), r.stderrTail, 'utf8');
     j.exitCode = r.exitCode;

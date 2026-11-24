@@ -324,9 +324,17 @@ export function createOrchestrator(runner = new Runner(), corrections = new Corr
         }
       }
 
+      // V2: a test-design job's answer (paid, re-checked) and stop/abandon, from its use case.
+      const dMatch = /^\/api\/assurance\/usecases\/([^/]+)\/([a-f0-9]{64})\/design\/([^/]+)\/(answer|cancel)$/.exec(p);
+      if (dMatch && method === 'POST') {
+        const [, tutorialId, ucHex, jobId, dAction] = dMatch;
+        const body = await readBody(req);
+        return json(res, 202, publicJob(dAction === 'answer' ? await usecases.answerDesign(tutorialId, ucHex, jobId, body) : await usecases.cancelDesign(tutorialId, ucHex, jobId)));
+      }
+
       // Assurance B3/B4: use cases. Retrieval runs free, read-only Kane commands; review is
       // KaneVerity's own; an approval is then written to Kane and verified, or reconciled.
-      const uMatch = /^\/api\/assurance\/usecases\/([^/]+)(?:\/(retrieve)|\/([a-f0-9]{64})\/(review|kane-write|reconcile))?$/.exec(p);
+      const uMatch = /^\/api\/assurance\/usecases\/([^/]+)(?:\/(retrieve)|\/([a-f0-9]{64})\/(review|kane-write|reconcile|design))?$/.exec(p);
       if (uMatch) {
         const [, tutorialId, retrieve, ucHex, action] = uMatch;
         if (method === 'GET' && !retrieve && !action) return json(res, 200, await usecases.view(tutorialId));
@@ -339,6 +347,11 @@ export function createOrchestrator(runner = new Runner(), corrections = new Corr
           const body = await readBody(req);
           const r = await usecases.review(tutorialId, ucHex, body);
           return json(res, 200, await usecases.view(tutorialId, r.note));
+        }
+        if (method === 'POST' && action === 'design') {
+          // V2: paid; fresh checks first; the job then runs in the background.
+          const body = await readBody(req);
+          return json(res, 202, publicJob(await usecases.design(tutorialId, ucHex, body)));
         }
         if (method === 'POST' && (action === 'kane-write' || action === 'reconcile')) {
           await readBody(req);
@@ -373,6 +386,7 @@ export function createOrchestrator(runner = new Runner(), corrections = new Corr
         if (method === 'GET' && !jAction) return json(res, 200, publicJob(await jobs.get(jobId)));
         if (method === 'POST' && jAction) {
           const body = await readBody(req);
+          // Test-design jobs are refused here (V2): they are answered and stopped from their use case.
           return json(res, 202, publicJob(jAction === 'answer' ? await jobs.answer(jobId, body) : await jobs.cancel(jobId)));
         }
       }

@@ -139,6 +139,8 @@ npm run dev:orchestrator    # API on :4000
 npm run test:orchestrator   # unit, security and fake-Kane end-to-end tests (no credits)
 ```
 
+The orchestrator loads your local `.env` (git-ignored) at startup. Tests never do: under the Node test runner, and whenever `KANEVERITY_ENV_FILE=none` is set, `.env` is skipped. Local settings such as `KANEVERITY_ASSURANCE_MODE` or `KANEVERITY_REVIEWER` therefore can't change test results.
+
 > **Start the orchestrator from a normal terminal.** When it was launched by an IDE or app "preview" runner, Kane CLI could not resolve your logged-in Test Manager credentials and exited at setup ("Project and folder must be configured", exit 2). KaneVerity correctly reported that run as BLOCKED, with 0 credits used. Started with `npm run dev:orchestrator` in a terminal, the same run worked.
 
 | Endpoint | Purpose |
@@ -152,12 +154,14 @@ npm run test:orchestrator   # unit, security and fake-Kane end-to-end tests (no 
 | `GET /api/assurance/requirements/:tutorialId` | One tutorial's requirements: state and reasons, the latest (or `?version=n`) document with its line map, every version, and a preview of what would be generated |
 | `POST /api/assurance/requirements/:tutorialId` | Generate requirements from the current documentation; a new version only if the content changed. Local and free: no Kane command runs |
 | `GET /api/assurance/status` | Whether Kane Assurance commands are switched on (`off` by default), the pinned Kane version, and which job kinds are enabled |
-| `GET/POST /api/assurance/jobs` | List jobs (`?tutorialId=`) or start an allow-listed job (`ingest`, `extract`, `design`, `list`, `cover`); paid kinds need `{"confirm": {"paid": true}}` |
-| `GET /api/assurance/jobs/:id`, `POST …/answer`, `POST …/cancel` | One job; answer a paused session's questions (validated against what Kane asked); stop, cancel or abandon. The internal approval-write job (`review`) cannot be started, listed as a kind, or cancelled here |
+| `GET/POST /api/assurance/jobs` | List jobs (`?tutorialId=`) or start an allow-listed job (`ingest`, `extract`, `list`, `cover`, `view`, `fsck`; test design and approval writes start only from the use-case endpoints); paid kinds need `{"confirm": {"paid": true}}` |
+| `GET /api/assurance/jobs/:id`, `POST …/answer`, `POST …/cancel` | One job; answer a paused session's questions (validated against what Kane asked); stop, cancel or abandon. The internal jobs are refused here: the approval write (`review`) cannot be started, listed as a kind or cancelled, and test design (`design`, and the resume of a design session) cannot be started, listed as a kind, answered or cancelled (see the use-case design endpoints) |
 | `GET /api/assurance/usecases/:tutorialId` | The latest use-case retrieval with citation checks, KaneVerity review state, Kane approval state, write history and design eligibility (B3, B4) |
 | `POST /api/assurance/usecases/:tutorialId/retrieve` | Read use cases from Kane with free, read-only commands (mode `free` or `all`) |
 | `POST /api/assurance/usecases/:tutorialId/:ucHex/review` | Record your decision (`approve`, or `reject` with a reason); an approval is then written to Kane and verified |
 | `POST …/:ucHex/kane-write`, `POST …/:ucHex/reconcile` | Write the latest approval to Kane again after "not written", or settle an unknown write by reading the store (never re-runs the write) |
+| `POST …/:ucHex/design` | Start Kane test design for this exact use case (paid: mode `all` and `{"confirm": {"paid": true}}`; optional `max` 1–8, default 1; `acknowledgePrevious` after an attempt with no known result). Reads the store again first and starts only if the use case is eligible |
+| `POST …/:ucHex/design/:jobId/answer`, `POST …/:ucHex/design/:jobId/cancel` | Answer a paused test-design session (paid: mode `all` and confirmation; the use case is read again and must still be eligible, with the same decision and reviewer), or stop a running design or abandon a paused one. The job must belong to this tutorial and this exact use case |
 
 - **MVP scope:** live verification runs **only** against the controlled local AcmeDesk demo (`127.0.0.1:5174`) and its docs (`127.0.0.1:5175`). Arbitrary third-party documentation is **not** supported for live execution yet. Kane's instructions ask it to stay on the app, and every origin seen in the evidence is checked **after** the run. External navigation is **detected, not prevented**: Kane CLI offers no browser-domain restriction. Any unexpected origin makes a verification NEEDS REVIEW and rejects an exploration or retest.
 - **Kane receives the documentation as written:** a fixed KaneVerity rules header, then the extracted steps word for word, then one `Assert that:` line per documented expected outcome. Kane is started as `node <kane-cli.cjs> run …`, with no shell.
@@ -239,7 +243,32 @@ Each retrieval is saved append-only under `data/assurance/usecases/<tutorialId>/
   - **Design must re-check.** The design gate reflects the latest retrieval, so test design must read Kane's store again just before it starts.
   - **Untested against real Kane.** The write and verification have been exercised only with a fake Kane CLI and a disposable store copy; the first real write needs a real decision on `uc-1`.
 
-- Next: test design (V2), with its own approval.
+**V2 safety (built): test design only for a verified approval.** The design command (`design tests --use-case <id> --mode agent --max <n>`) can no longer be started from the generic jobs API. It runs only through the use-case endpoint, and the page offers it only for an approved, verified use case.
+
+- **Before starting**, refused at no cost if any of these is missing: the reviewer setting, mode `all`, and your explicit paid confirmation.
+- **Fresh checks:** KaneVerity then reads Kane's store again with free commands. It starts only if all of these hold:
+  - the store passes its integrity checks;
+  - the exact approved content id is still there;
+  - the latest KaneVerity decision for it is an approval, and its Kane write is verified;
+  - Kane lists it as trusted;
+  - the requirements and documentation are current.
+
+  The job is then bound to the tutorial, that content id, the decision id, and the Kane id the fresh read gave that version (`uc-1`). Kane receives `USER=kaneverity:<reviewer>`.
+- **Re-checked right before Kane starts** (a job can wait behind other Kane work): if the decision, reviewer, Kane id or eligibility changed, the job is refused at no cost.
+- **One at a time:** one design per tutorial at a time, and decisions are locked while one is queued or running.
+- **No re-design:** a use case that already has a design is not designed again, because that would need `--force`, which is never passed.
+- **No silent retries:** an attempt that ended without a known result (error, crash, interruption, cancellation, an abandoned or expired session) is never retried. A new paid attempt needs `acknowledgePrevious` naming that job.
+- **Kane's questions** pause the job, and nothing is answered automatically. Answering is a separate paid step from the use case (`…/design/:jobId/answer`). It is refused if the mode isn't `all`, the reviewer setting changed, the use case was rejected, or its decision changed meanwhile.
+- **Generic jobs API:** it can't start, list, answer or stop a design. Stopping a running design or abandoning a paused one goes through `…/design/:jobId/cancel`.
+- **Retrieval safeguards added in this review:**
+  - The runner now waits until Kane's private output file is fully written before reporting the job finished; before, a read could in principle lose its last lines.
+  - A retrieval now fails integrity if `context list` and `context view` name different use cases, so a use case can't silently drop out of review.
+- **Limitations:**
+  - **No cost estimate:** there is none for design. Kane reports the credits used, or the balance difference is recorded, or "unknown".
+  - **Not yet run against real Kane:** the flow is tested only with a fake Kane CLI. The real design (V2) needs its own approval.
+  - **No fidelity check yet:** the check of the designed test against the documented labels and order is not built, so a designed test isn't evidence of anything until that check exists.
+
+- Next: the real test design (V2), with its own approval.
 
 ## Correction loop: Claude review and independent Kane retest
 

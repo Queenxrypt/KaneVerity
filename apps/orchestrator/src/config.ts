@@ -9,10 +9,16 @@ import { REVIEWER_PATTERN } from './assurance/commands.ts';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = path.resolve(HERE, '..', '..', '..');
 
-try {
-  process.loadEnvFile(path.join(REPO_ROOT, '.env'));
-} catch {
-  // .env is optional.
+// The local .env (never committed) is loaded, except under the Node test runner
+// (NODE_TEST_CONTEXT is set for every test file) or with KANEVERITY_ENV_FILE=none:
+// tests must not depend on, or be changed by, a developer's local settings (for example
+// KANEVERITY_ASSURANCE_MODE or KANEVERITY_REVIEWER).
+if (!process.env.NODE_TEST_CONTEXT && process.env.KANEVERITY_ENV_FILE !== 'none') {
+  try {
+    process.loadEnvFile(path.join(REPO_ROOT, '.env'));
+  } catch {
+    // .env is optional.
+  }
 }
 
 function list(value: string | undefined, fallback: string[]): string[] {

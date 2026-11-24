@@ -464,3 +464,68 @@ unchanged, and the copy was deleted afterwards. Validated:
   retrieval.
 - **Not done:** no review was written to the real store; the real `uc-1` is unreviewed. Test design
   (V2) is not started.
+
+### 12.5 V2 preparation: test design safety (2026-11-24, built; no real design run yet)
+
+**Findings that led to it.** The B2 `design` job could be started from the generic jobs API with
+mode `all`. It had no tutorial binding, no design-gate check and no fresh read of the store, and it
+passed only Kane's logical id (`uc-1`), not the approved content id.
+
+**What Kane 0.10.5 shows** (help and bundled code; design not yet run here):
+
+- Command: `design tests --use-case <id> --mode agent --max <n>`.
+- Store choice: a `.context` folder in the working folder and no `.testmuai/assurance.json` project
+  link means the local store; both means `BOTH_STORES` refused.
+- Refusal codes: `UC_UNREVIEWED`, `UC_ARCHIVED`, `UC_HELD`, `UC_TIP_MOVED` (on resume) and
+  `DESIGN_FAILED`. A use case that already has a design needs `--force`.
+- Credits are used (agent turns; `usage` events), with no cost cap flag.
+
+**Built:**
+
+- **Isolation:** `design` is internal like `review`: not listed and not startable from
+  `/api/assurance/jobs`. It is started only by `POST /api/assurance/usecases/:t/:ucHex/design`
+  (`usecases.ts`).
+- **Before any Kane read:** the reviewer setting, mode `all`, the paid confirmation and `max`
+  (1–8, default 1) are checked.
+- **Write lock:** no design while an approval write is pending or unknown.
+- **Earlier attempt for this content id:**
+  - queued, running or paused blocks a new one;
+  - complete means already designed, with no re-design;
+  - refused allows a new attempt;
+  - any other outcome needs `acknowledgePrevious: <jobId>`. Nothing is retried automatically, and
+    an interrupted paid job's cost is "unknown".
+- **Fresh checks:** a free retrieval, then the content id must be present; the full design gate must
+  pass (latest decision approved, Kane write verified and still the newest record for the use case,
+  Kane trust `trusted`, no outside approval, integrity intact, requirements current); and Kane's
+  logical id must name exactly that version.
+- **Binding:** the job is bound to `{tutorialId, ucCid, useCase, decisionId, reviewer}`, with
+  `USER=kaneverity:<reviewer>`.
+- **Run-time preflight:** right before Kane starts (the Kane lock is held, so no Kane read), the
+  decision, reviewer, Kane id and eligibility are re-checked against KaneVerity's state. A
+  mismatch means "refused", with nothing run or charged.
+- **Pauses:** questions are never answered automatically. Answering is paid, through
+  `POST /api/assurance/usecases/:t/:ucHex/design/:jobId/answer` (mode `all`, confirmation, the same
+  reviewer, the job bound to this use case). It runs the fresh checks again, keeps the same binding,
+  and is refused if the decision changed. Decisions are locked while a design is queued or running;
+  they stay allowed while it is paused.
+- **Stopping:** a running design is stopped, or a paused one abandoned, only through
+  `…/design/:jobId/cancel`. The generic jobs API refuses to start, list, answer or cancel any design
+  job or design resume (the approval write stays non-cancellable anywhere).
+- **Tests:** 16 cases with the fake Kane CLI in `tests/assurance-design.test.ts`.
+- **Final review (2026-11-24):** one test failed once in a full run (a second use case missing
+  from a retrieval that still passed integrity). Two real gaps explain it, both fixed:
+  - **Output file race:** the runner reported a Kane job finished without waiting for its private
+    output file to be flushed, so a read could in principle lose its last lines. It now waits.
+  - **No list/view comparison:** nothing compared Kane's `list` with its `view`. A retrieval now
+    fails integrity if they name different use cases (a regression test simulates the lost line).
+  - **Not reproduced:** in five full runs or a stress run of four parallel copies, so the link
+    between these gaps and that one failure is inferred, not proven.
+  - **Test isolation:** tests no longer load the developer's `.env` (see the README).
+
+**Still open for V2 (real run):**
+
+- the real event stream and record shapes of design;
+- whether designed tests keep the exact labels and order (the fidelity check, section 7.3, is not
+  built);
+- the review of acceptance criteria and scenarios;
+- the cost.

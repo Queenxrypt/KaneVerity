@@ -150,6 +150,16 @@ export function AssuranceJobsPanel({ tutorialId, requirementsState, requirements
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<Pending>(null);
+  // V2: a test-design job (or design resume) carries its use-case content id; it is answered
+  // and stopped through that use case's design endpoints, never the generic jobs API.
+  const designCid = (j: PublicJob): string | null => {
+    const p = j.params as { kind?: string; verb?: string; ucCid?: unknown };
+    return (p.kind === 'design' || (p.kind === 'resume' && p.verb === 'design')) && typeof p.ucCid === 'string' ? p.ucCid : null;
+  };
+  const stop = (j: PublicJob) => {
+    const cid = designCid(j);
+    return cid ? api.cancelDesign(tutorialId, cid, j.jobId) : api.cancelJob(j.jobId);
+  };
 
   const load = useCallback(async () => {
     try {
@@ -270,17 +280,17 @@ export function AssuranceJobsPanel({ tutorialId, requirementsState, requirements
                           title: 'Send your answers and resume? This uses credits.',
                           body: 'Kane resumes the same session with your answers. Kane may ask again.',
                           paid: true,
-                          run: () => api.answerJob(j.jobId, answers),
+                          run: () => (designCid(j) ? api.answerDesign(tutorialId, designCid(j)!, j.jobId, answers) : api.answerJob(j.jobId, answers)),
                         })
                       }
                     />
-                    <button type="button" className="mt-2 text-sm font-medium text-slate-600 hover:underline" disabled={busy} onClick={() => setPending({ title: 'Abandon this session?', body: "KaneVerity won't resume it. Kane keeps it until it expires.", paid: false, run: () => api.cancelJob(j.jobId) })}>
+                    <button type="button" className="mt-2 text-sm font-medium text-slate-600 hover:underline" disabled={busy} onClick={() => setPending({ title: 'Abandon this session?', body: "KaneVerity won't resume it. Kane keeps it until it expires.", paid: false, run: () => stop(j) })}>
                       Abandon session
                     </button>
                   </div>
                 )}
                 {ACTIVE.includes(j.state) && (
-                  <button type="button" className="text-sm font-medium text-slate-600 hover:underline" disabled={busy} onClick={() => setPending({ title: 'Stop this job?', body: 'Stopping a running Kane job leaves its outcome unknown.', paid: false, run: () => api.cancelJob(j.jobId) })}>
+                  <button type="button" className="text-sm font-medium text-slate-600 hover:underline" disabled={busy} onClick={() => setPending({ title: 'Stop this job?', body: 'Stopping a running Kane job leaves its outcome unknown.', paid: false, run: () => stop(j) })}>
                     Stop
                   </button>
                 )}

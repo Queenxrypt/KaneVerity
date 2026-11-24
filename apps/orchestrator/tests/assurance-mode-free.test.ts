@@ -12,8 +12,13 @@ const { AssuranceJobs } = await import('../src/assurance/jobs.ts');
 
 test('free mode refuses every paid command, whatever the confirmation', async () => {
   const jobs = new AssuranceJobs({ entry: path.join(import.meta.dirname, 'fake-kane-assurance.cjs') });
-  for (const req of [{ kind: 'extract', tutorialId: 'generate-an-api-key', confirm: { paid: true } }, { kind: 'design', useCase: 'uc-a-b', max: 1, confirm: { paid: true } }]) {
-    await assert.rejects(jobs.start(req), (e: Error & { status?: number }) => e.status === 403 && /Only free Assurance commands/.test(e.message), JSON.stringify(req));
-  }
+  await assert.rejects(jobs.start({ kind: 'extract', tutorialId: 'generate-an-api-key', confirm: { paid: true } }), (e: Error & { status?: number }) => e.status === 403 && /Only free Assurance commands/.test(e.message));
+  // Design is internal (V2): the generic API never starts it, and the runner's own design
+  // entry still refuses in free mode.
+  await assert.rejects(jobs.start({ kind: 'design', useCase: 'uc-a-b', max: 1, confirm: { paid: true } }), (e: Error & { status?: number }) => e.status === 400 && /Unknown job kind/.test(e.message));
+  await assert.rejects(
+    jobs.startDesign({ tutorialId: 'generate-an-api-key', ucCid: 'sha256:' + 'd'.repeat(64), useCase: 'uc-1', max: 1, reviewer: 'r', decisionId: 'd20261124-000000-aaaaaa', acknowledgedPrevious: null, requirements: null, confirm: { paid: true } }),
+    (e: Error & { status?: number }) => e.status === 403 && /Only free Assurance commands/.test(e.message),
+  );
   assert.deepEqual(await jobs.list(), []);
 });

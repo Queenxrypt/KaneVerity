@@ -30,7 +30,7 @@ import { findLeaks, scrub, scrubDeep } from '../verify/redact.ts';
 import { checkCitations, type CitationReport } from './citations.ts';
 import type { LineMapEntry } from './requirements.ts';
 import { kaneUserFor, sourceIdFor } from './commands.ts';
-import { jobStdoutPath, type AssuranceJobs, type JobRecord } from './jobs.ts';
+import { JOB_ID_PATTERN, jobStdoutPath, type AssuranceJobs, type JobRecord } from './jobs.ts';
 import {
   blockingWrite,
   currentWrites,
@@ -169,6 +169,8 @@ export class AssuranceUseCases {
   constructor(jobs: AssuranceJobs, requirements: RequirementsService) {
     this.jobs = jobs;
     this.requirements = requirements;
+    // Right before Kane starts a design (or design resume): re-check KaneVerity's own state.
+    jobs.setDesignPreflight((j) => this.designPreflight(j));
   }
 
   private async serial<T>(key: string, fn: () => Promise<T>): Promise<T> {
@@ -259,7 +261,7 @@ export class AssuranceUseCases {
           problems.push('context list returned a line that is not JSON.');
         }
       }
-      let view: { meta?: { schema?: unknown; tipHash?: unknown }; nodes?: { cid: string; trust: string }[]; edges?: { src: string; dst: string; anchors?: string[] }[]; contentHtml?: Record<string, string> } = {};
+      let view: { meta?: { schema?: unknown; tipHash?: unknown }; nodes?: { cid: string; trust: string; label?: string }[]; edges?: { src: string; dst: string; anchors?: string[] }[]; contentHtml?: Record<string, string> } = {};
       try {
         view = JSON.parse(viewRun.stdout);
       } catch {
@@ -301,6 +303,11 @@ export class AssuranceUseCases {
 
       // Live use cases (as Kane lists them), cross-checked against the records and the view.
       const liveRows = rows.filter((r) => r.label === 'usecase');
+      // `context list` and `context view` must name the same use cases: a use case missing
+      // from either (for example a truncated read) fails the integrity check rather than
+      // silently disappearing from the review.
+      const viewUcs = (view.nodes ?? []).filter((n) => n.label === 'usecase').map((n) => n.cid);
+      if (!sortedEq(viewUcs, liveRows.map((r) => r.cid))) problems.push(`context list and context view show different use cases (list: ${liveRows.length}, view: ${viewUcs.length}).`);
       const useCases: SnapshotUseCase[] = [];
       for (const row of liveRows) {
         const uc: StoreUseCase | undefined = store.useCases.find((u) => u.cid === row.cid);
@@ -492,6 +499,9 @@ export class AssuranceUseCases {
     };
     if (!snap) return scrubDeep({ ...base, snapshot: null, useCases: [] });
     const current = await this.requirementsCurrent(snap);
+    // V2: the latest design attempt per use-case version, and what it allows next.
+    const designInfo = new Map<string, { job: JobRecord | null; prev: Awaited<ReturnType<AssuranceUseCases['previousDesign']>> }>();
+    for (const uc of snap.useCases) designInfo.set(uc.cid, { job: (await this.designJobs(tutorialId, uc.cid))[0] ?? null, prev: await this.previousDesign(tutorialId, uc.cid) });
     const pub = scrubDeep({
       ...base,
       snapshot: { snapshot: snap.snapshot, retrievedAt: snap.retrievedAt, cliVersion: snap.cliVersion, integrity: snap.integrity, store: { records: snap.store.records, tipPrefix: snap.store.tipPrefix, tipHash: snap.store.tipHash ?? null }, fsck: snap.fsck, requirements: snap.requirements, requirementsCurrent: current },
@@ -522,6 +532,17 @@ export class AssuranceUseCases {
           },
           kaneWrites: groupWrites(kaneWrites.filter((x) => x.ucCid === uc.cid), this.activeWrites),
           design,
+          testDesign: (() => {
+            const d = designInfo.get(uc.cid)!;
+            const j = d.job;
+            const expired = !!j && j.state === 'paused' && !!j.pause?.expiresAt && Date.parse(j.pause.expiresAt) < Date.now();
+            return {
+              latestJob: j ? { jobId: j.jobId, kind: j.kind, state: expired ? 'expired' : j.state, reason: j.reason, createdAt: j.createdAt } : null,
+              blockedBy: d.prev.block,
+              needsAcknowledgement: d.prev.needsAck,
+              canStart: design.eligible && config.assurance.mode === 'all' && !!reviewer.label && !d.prev.block && !blocking,
+            };
+          })(),
         };
       }),
     });
@@ -543,6 +564,8 @@ export class AssuranceUseCases {
     return this.serial(`review:${tutorialId}`, async () => {
       const blocking = blockingWrite((await this.log(tutorialId)).kaneWrites);
       if (blocking) throw new AssuranceError(409, this.lockedMessage(blocking));
+      const designing = await this.designActive(tutorialId);
+      if (designing) throw new AssuranceError(409, `A test design for this tutorial is ${designing.state} (job ${designing.jobId}). Decisions are locked until it finishes.`);
       const snap = await this.latest(tutorialId);
       const uc = snap?.useCases.find((u) => u.cid === cid);
       if (!snap || !uc) throw new AssuranceError(404, 'Use case not found in the latest retrieval.');
@@ -608,6 +631,169 @@ export class AssuranceUseCases {
       }
       return this.settle(tutorialId, { ...w, state: 'unknown' }, null, 'reconcile');
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // V2: test design, only for the latest KaneVerity approval verified in Kane.
+  // ---------------------------------------------------------------------------
+
+  /** Design jobs and design resumes for one tutorial (and use-case version), newest first. */
+  private async designJobs(tutorialId: string, ucCid?: string): Promise<JobRecord[]> {
+    return (await this.jobs.list(tutorialId)).filter((j) => {
+      const p = j.params;
+      const cid = p.kind === 'design' ? p.ucCid : p.kind === 'resume' && p.verb === 'design' ? p.ucCid : undefined;
+      return cid !== undefined && (!ucCid || cid === ucCid);
+    });
+  }
+
+  private async designActive(tutorialId: string): Promise<JobRecord | null> {
+    return (await this.designJobs(tutorialId)).find((j) => j.state === 'queued' || j.state === 'running') ?? null;
+  }
+
+  /**
+   * What the latest design attempt for this use-case version allows next:
+   * - in progress (queued, running) or paused and not expired: nothing new (answer or abandon it);
+   * - complete: already designed (re-design would need --force, which KaneVerity never passes);
+   * - refused before doing anything: a new attempt (with a new paid confirmation);
+   * - any other outcome (error, crash, interruption, cancellation, abandoned or expired
+   *   session): unknown or partial, so a new attempt needs an explicit acknowledgement of
+   *   that job id. Nothing is ever retried automatically.
+   */
+  private async previousDesign(tutorialId: string, ucCid: string): Promise<{ block: string | null; needsAck: string | null }> {
+    const latest = (await this.designJobs(tutorialId, ucCid))[0];
+    if (!latest) return { block: null, needsAck: null };
+    const expired = latest.state === 'paused' && !!latest.pause?.expiresAt && Date.parse(latest.pause.expiresAt) < Date.now();
+    if (latest.state === 'queued' || latest.state === 'running') return { block: `A test design for this use case is already ${latest.state} (job ${latest.jobId}).`, needsAck: null };
+    if (latest.state === 'paused' && !expired) return { block: `A test design for this use case is paused with Kane's questions (job ${latest.jobId}). Answer it or abandon it first.`, needsAck: null };
+    if (latest.state === 'complete') return { block: `This use case already has a test design (job ${latest.jobId}). Designing it again is not supported: it would need --force, which KaneVerity never passes.`, needsAck: null };
+    if (latest.state === 'refused') return { block: null, needsAck: null };
+    return { block: null, needsAck: latest.jobId };
+  }
+
+  /** Fresh read, then every design condition for the exact content id. Returns what the job binds to. */
+  private async freshDesignChecks(tutorialId: string, cid: string) {
+    const fresh = await this.retrieve(tutorialId);
+    const ucNow = fresh.useCases.find((u) => u.cid === cid);
+    if (!ucNow) throw new AssuranceError(409, 'Not started: this exact use-case version (content id) is not in Kane\'s store any more. Read the use cases again and review the current version.');
+    const { decisions, kaneWrites } = await this.log(tutorialId);
+    const { r, status } = this.kaneStatus(fresh, ucNow, decisions, kaneWrites);
+    const reqCurrent = await this.requirementsCurrent(fresh);
+    const elig = designEligibility({ state: r.state, integrityOk: fresh.integrity.ok, inLatestSnapshot: true, requirementsCurrent: reqCurrent, kane: status });
+    if (!elig.eligible || !r.latestId) throw new AssuranceError(409, `Not started: ${elig.reasons.join(' ') || 'the use case is not eligible for test design.'}`);
+    // The logical id Kane gives this version now must name exactly this version.
+    if (fresh.useCases.filter((u) => u.logicalId === ucNow.logicalId).length !== 1) throw new AssuranceError(409, `Not started: Kane's id ${ucNow.logicalId} does not name exactly one use case.`);
+    return { fresh, ucNow, decisionId: r.latestId };
+  }
+
+  /**
+   * Start test design for one use-case version (V2). Paid: needs Assurance mode "all" and
+   * {confirm: {paid: true}}. Optional {max: 1-8} (default 1) and, after an attempt with an
+   * unknown outcome, {acknowledgePrevious: "<that job id>"}.
+   */
+  async design(tutorialId: unknown, ucHex: unknown, body: unknown): Promise<JobRecord> {
+    if (!isTutorialId(tutorialId)) throw new AssuranceError(404, 'Tutorial not found.');
+    if (typeof ucHex !== 'string' || !UC_HEX.test(ucHex)) throw new AssuranceError(404, 'Use case not found.');
+    const cid = `sha256:${ucHex}`;
+    const b = (body && typeof body === 'object' ? body : {}) as { confirm?: unknown; max?: unknown; acknowledgePrevious?: unknown };
+    this.refuseWhileWriting(tutorialId);
+    return this.serial(`review:${tutorialId}`, async () => {
+      const reviewer = reviewerSetting();
+      if (!reviewer.label) throw new AssuranceError(409, reviewer.problem ?? 'No reviewer is set.');
+      // Checked before any Kane read, so a refused request costs nothing.
+      if (config.assurance.mode !== 'all') throw new AssuranceError(403, 'Test design uses Kane credits, so it needs Assurance mode "all". Nothing was started.');
+      const paidOk = !!b.confirm && typeof b.confirm === 'object' && (b.confirm as { paid?: unknown }).paid === true;
+      if (!paidOk) throw new AssuranceError(400, 'This command uses Kane credits. Confirm it explicitly ({"confirm": {"paid": true}}).');
+      const max = b.max === undefined ? 1 : b.max;
+      if (typeof max !== 'number' || !Number.isInteger(max) || max < 1 || max > 8) throw new AssuranceError(400, 'max must be a whole number from 1 to 8.');
+      const blocking = blockingWrite((await this.log(tutorialId)).kaneWrites);
+      if (blocking) throw new AssuranceError(409, this.lockedMessage(blocking));
+      const prev = await this.previousDesign(tutorialId, cid);
+      if (prev.block) throw new AssuranceError(409, prev.block);
+      if (prev.needsAck && b.acknowledgePrevious !== prev.needsAck) {
+        throw new AssuranceError(409, `The previous design attempt for this use case (job ${prev.needsAck}) ended without a known result. Kane may hold part of a design. Check it, then start again with {"acknowledgePrevious": "${prev.needsAck}"}; it is never retried automatically.`);
+      }
+      const { fresh, ucNow, decisionId } = await this.freshDesignChecks(tutorialId, cid);
+      return this.jobs.startDesign({
+        tutorialId,
+        ucCid: cid,
+        useCase: ucNow.logicalId,
+        max,
+        reviewer: reviewer.label,
+        decisionId,
+        acknowledgedPrevious: prev.needsAck,
+        requirements: fresh.requirements,
+        confirm: b.confirm,
+      });
+    });
+  }
+
+  /** Answer a paused job. A design session is re-checked (fresh read) before its paid resume. */
+  /** A design job (or design resume) of this tutorial and this exact use-case version, or 404. */
+  private async boundDesignJob(tutorialId: unknown, ucHex: unknown, jobId: unknown) {
+    if (!isTutorialId(tutorialId)) throw new AssuranceError(404, 'Tutorial not found.');
+    if (typeof ucHex !== 'string' || !UC_HEX.test(ucHex)) throw new AssuranceError(404, 'Use case not found.');
+    if (typeof jobId !== 'string' || !JOB_ID_PATTERN.test(jobId)) throw new AssuranceError(404, 'Job not found.');
+    const job = await this.jobs.get(jobId);
+    const p = job.params;
+    const bound = p.kind === 'design' ? p : p.kind === 'resume' && p.verb === 'design' ? p : null;
+    if (!bound || job.tutorialId !== tutorialId || bound.ucCid !== `sha256:${ucHex}`) throw new AssuranceError(404, 'No test-design job with this id for this use case.');
+    return { job, bound: bound as { ucCid: string; decisionId?: string; reviewer?: string }, tutorialId, cid: `sha256:${ucHex}` };
+  }
+
+  /**
+   * Answer a paused test-design session (paid): the use case is read again and must still
+   * be eligible, with the same KaneVerity decision the design started from.
+   */
+  async answerDesign(tutorialId: unknown, ucHex: unknown, jobId: unknown, body: unknown): Promise<JobRecord> {
+    const { job, bound, tutorialId: t, cid } = await this.boundDesignJob(tutorialId, ucHex, jobId);
+    this.refuseWhileWriting(t);
+    return this.serial(`review:${t}`, async () => {
+      const b = (body && typeof body === 'object' ? body : {}) as { confirm?: unknown };
+      const paidOk = !!b.confirm && typeof b.confirm === 'object' && (b.confirm as { paid?: unknown }).paid === true;
+      if (!paidOk) throw new AssuranceError(400, 'This command uses Kane credits. Confirm it explicitly ({"confirm": {"paid": true}}).');
+      // Refused before any Kane read, like starting a design.
+      if (config.assurance.mode !== 'all') throw new AssuranceError(403, 'Answering a test-design session uses Kane credits, so it needs Assurance mode "all". Nothing was started.');
+      const reviewer = reviewerSetting();
+      if (!reviewer.label || reviewer.label !== bound.reviewer) throw new AssuranceError(409, reviewer.label ? 'Not resumed: the reviewer setting changed since this design started. Abandon this session.' : (reviewer.problem ?? 'No reviewer is set.'));
+      if (job.state !== 'paused') return this.jobs.answer(job.jobId, body, { internal: true }); // the runner's own refusal
+      const { decisionId } = await this.freshDesignChecks(t, cid);
+      if (decisionId !== bound.decisionId) throw new AssuranceError(409, 'Not resumed: the KaneVerity decision this design relies on has changed. Abandon this session.');
+      return this.jobs.answer(job.jobId, body, { internal: true });
+    });
+  }
+
+  /** Stop a running test design, or abandon a paused session (no Kane command; free). */
+  async cancelDesign(tutorialId: unknown, ucHex: unknown, jobId: unknown): Promise<JobRecord> {
+    const { job } = await this.boundDesignJob(tutorialId, ucHex, jobId);
+    return this.jobs.cancel(job.jobId, { internal: true });
+  }
+
+  /**
+   * Right before Kane starts a design or design resume (the job may have queued behind
+   * other Kane work). No Kane command can run here (the Kane lock is held), so this checks
+   * KaneVerity's own state against the latest retrieval. A reason means "do not start".
+   */
+  private async designPreflight(j: JobRecord): Promise<string | null> {
+    const p = j.params;
+    const bound = p.kind === 'design' ? p : p.kind === 'resume' && p.verb === 'design' ? p : null;
+    if (!bound || !j.tutorialId || !bound.ucCid || !bound.decisionId) return 'the job is not bound to a reviewed use case.';
+    try {
+      const reviewer = reviewerSetting();
+      if (!reviewer.label || reviewer.label !== bound.reviewer) return 'the reviewer setting changed since the design was requested.';
+      const { decisions, kaneWrites } = await this.log(j.tutorialId);
+      if (blockingWrite(kaneWrites)) return 'an approval write to Kane is pending or has an unknown outcome.';
+      const snap = await this.latest(j.tutorialId);
+      const uc = snap?.useCases.find((u) => u.cid === bound.ucCid);
+      if (!snap || !uc) return 'this use-case version is not in the latest retrieval.';
+      const { r, status } = this.kaneStatus(snap, uc, decisions, kaneWrites);
+      if (r.latestId !== bound.decisionId) return 'the KaneVerity decision changed since the design was requested.';
+      const elig = designEligibility({ state: r.state, integrityOk: snap.integrity.ok, inLatestSnapshot: true, requirementsCurrent: await this.requirementsCurrent(snap), kane: status });
+      if (!elig.eligible) return elig.reasons.join(' ');
+      if (p.kind === 'design' && uc.logicalId !== p.useCase) return `Kane's id for this use case changed (${p.useCase} is now ${uc.logicalId}).`;
+      return null;
+    } catch (err) {
+      return `the checks could not be completed (${(err as Error).message}).`;
+    }
   }
 
   private lockedMessage(w: KaneWriteEntry): string {

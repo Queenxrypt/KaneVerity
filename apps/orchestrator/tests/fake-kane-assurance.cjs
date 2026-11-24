@@ -85,6 +85,8 @@ if (script.dynamic && argv[0] === 'context' && ['fsck', 'list', 'view', 'review'
     if (!inferred) for (const s of sources) out({ id: s.content.source_id, cid: s.cid, label: 'source', title: s.content.source_id, trust: '-', fresh: 'fresh' });
     ucs.forEach((u, i) => {
       if (inferred && trust.get(u.cid) !== 'derived') return;
+      // script.listDropLast: simulate a list read that lost its last use-case row.
+      if (script.listDropLast && i === ucs.length - 1) return;
       out({ id: `uc-${i + 1}`, cid: u.cid, label: 'usecase', title: u.content.title, trust: trust.get(u.cid), fresh: 'fresh' });
     });
     process.exit(0);
@@ -99,7 +101,8 @@ if (script.dynamic && argv[0] === 'context' && ['fsck', 'list', 'view', 'review'
     }
     out({
       meta: { schema: 'assurance/context@1', tipHash: hashes[String(records.length)], storePath: 'C:\\Users\\someone\\private\\.context' },
-      nodes: [...ucs.map((u) => ({ cid: u.cid, trust: trust.get(u.cid) })), ...sources.map((s) => ({ cid: s.cid, trust: 'derived' }))],
+      // Real 0.10.5 view nodes carry their label (V1, V-B4a).
+      nodes: [...ucs.map((u) => ({ cid: u.cid, label: 'usecase', trust: trust.get(u.cid) })), ...sources.map((s) => ({ cid: s.cid, label: 'source', trust: 'derived' }))],
       edges: [...grouped.values()],
       contentHtml: Object.fromEntries(ucs.map((u) => [u.cid, `<ul class="crit">${u.content.criteria.map((c) => `<li>${esc(c)}</li>`).join('')}</ul>`])),
     });

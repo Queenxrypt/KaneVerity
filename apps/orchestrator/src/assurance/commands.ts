@@ -20,12 +20,15 @@ export interface JobKindInfo {
   output: 'ndjson' | 'text' | 'json';
   /** Started only by KaneVerity's own workflow (B4 approval write), never from the jobs API. */
   internal?: boolean;
+  /** False: never stopped from the jobs API (an approval write would only become "unknown"). */
+  cancellable?: boolean;
 }
 
 export const JOB_KINDS: Record<JobKind, JobKindInfo> = {
   ingest: { kind: 'ingest', label: 'Land requirements in the Assurance store', paid: false, writesStore: true, output: 'text' },
   extract: { kind: 'extract', label: 'Extract use cases', paid: true, writesStore: true, output: 'ndjson' },
-  design: { kind: 'design', label: 'Design tests for a use case', paid: true, writesStore: true, output: 'ndjson' },
+  // V2 safety: started only through the use-case design endpoint, after fresh checks (usecases.ts).
+  design: { kind: 'design', label: 'Design tests for a use case', paid: true, writesStore: true, output: 'ndjson', internal: true },
   resume: { kind: 'resume', label: 'Answer and resume', paid: true, writesStore: true, output: 'ndjson' },
   list: { kind: 'list', label: 'List the store', paid: false, writesStore: false, output: 'json' },
   cover: { kind: 'cover', label: 'Read coverage', paid: false, writesStore: false, output: 'ndjson' },
@@ -33,7 +36,7 @@ export const JOB_KINDS: Record<JobKind, JobKindInfo> = {
   view: { kind: 'view', label: 'Read the store view', paid: false, writesStore: false, output: 'json' },
   fsck: { kind: 'fsck', label: 'Check the store', paid: false, writesStore: false, output: 'json' },
   // B4: write one KaneVerity approval into the store (documented as free; validated in V-B4a).
-  review: { kind: 'review', label: 'Record a KaneVerity approval in Kane', paid: false, writesStore: true, output: 'json', internal: true },
+  review: { kind: 'review', label: 'Record a KaneVerity approval in Kane', paid: false, writesStore: true, output: 'json', internal: true, cancellable: false },
 };
 
 /**
@@ -75,8 +78,14 @@ export function requirementsFileFor(tutorialId: string): string {
 export type JobParams =
   | { kind: 'ingest'; tutorialId: string }
   | { kind: 'extract'; tutorialId: string }
-  | { kind: 'design'; useCase: string; max: number }
-  | { kind: 'resume'; verb: 'extract' | 'design'; sid: string; answers: { id: string; value: string }[] }
+  /**
+   * Design is bound to one tutorial, one exact use-case version (ucCid), the Kane logical
+   * id that version had at the fresh pre-start read (useCase), the KaneVerity decision it
+   * relies on, and the self-declared reviewer passed to Kane as USER.
+   */
+  | { kind: 'design'; tutorialId: string; ucCid: string; useCase: string; max: number; reviewer: string; decisionId: string; acknowledgedPrevious: string | null }
+  /** A design session's resume carries the same binding (ucCid, decisionId, reviewer). */
+  | { kind: 'resume'; verb: 'extract' | 'design'; sid: string; answers: { id: string; value: string }[]; ucCid?: string; decisionId?: string; reviewer?: string }
   | { kind: 'list'; inferred: boolean }
   | { kind: 'cover' }
   | { kind: 'view' }
@@ -113,6 +122,9 @@ function argsFor(p: JobParams): string[] {
     case 'extract':
       return ['context', 'extract', '--mode', 'agent', '--local', '--source', sourceIdFor(p.tutorialId)];
     case 'design':
+      sourceIdFor(p.tutorialId);
+      if (!CONTENT_ID.test(p.ucCid)) throw new CommandError('Invalid use-case content id.');
+      kaneUserFor(p.reviewer);
       if (!LOGICAL_ID.test(p.useCase) || p.useCase.length > 120) throw new CommandError('Invalid use-case reference.');
       if (!Number.isInteger(p.max) || p.max < 1 || p.max > 8) throw new CommandError('max must be a whole number from 1 to 8.');
       return ['design', 'tests', '--use-case', p.useCase, '--mode', 'agent', '--max', String(p.max)];

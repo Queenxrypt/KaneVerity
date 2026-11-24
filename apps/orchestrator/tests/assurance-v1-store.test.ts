@@ -54,7 +54,8 @@ test('the actual V1 store reads, passes the checks, and shows exactly the V1 fin
   await cp(STORE, path.join(tmp, '.context'), { recursive: true });
   const store = await readStore(path.join(tmp, '.context'), '0.10.5');
   assert.equal(store.ok, true, store.problems.join(' '));
-  assert.equal(store.records, 2);
+  // 2 records (V1), or 3 after V-B4b wrote KaneVerity's verified approval (checked below).
+  assert.ok(store.records === 2 || store.records === 3, `records: ${store.records}`);
   assert.deepEqual(store.builds, ['0.10.5']);
   assert.equal(store.sources.length, 1);
   assert.equal(store.sources[0].sourceId, 'kv-generate-an-api-key');
@@ -89,11 +90,30 @@ test('the actual V1 store reads, passes the checks, and shows exactly the V1 fin
 
   // Kane's own "skipped" verdict is read for information only.
   assert.deepEqual(store.kaneVerdicts.map((v) => [v.resolution, v.attributedTo]), [['skipped', 'human:owner']]);
-  // B4: the real V1 store has no committed review items (uc-1 is unreviewed).
-  assert.deepEqual(store.reviews, []);
+  const REC2 = 'sha256:3be455d75e7bfa9a789eae9b0db6809ee8af6c2711a29bde04f47939f33fae65';
+  if (store.records === 3) {
+    // After V-B4b: record 3 is exactly one approval of uc-1, recorded for KaneVerity's
+    // self-declared reviewer, review-only, linked to record 2. Nothing else was added.
+    assert.equal(store.reviews.length, 1);
+    const r = store.reviews[0];
+    assert.equal(r.seq, 3);
+    assert.equal(r.ucCid, uc.cid);
+    assert.equal(r.resolution, 'approved');
+    assert.match(r.by, /^human:kaneverity:[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/);
+    assert.equal(r.reviewOnly, true);
+    assert.equal(r.itemsInRecord, 1);
+    assert.equal(r.prevHash, REC2);
+    assert.equal(r.build, '0.10.5');
+    assert.equal(store.useCases.length, 1, 'no new use case');
+    // The rest of this test replays V-B4a's record 3 onto the V1 records only.
+    await rm(path.join(tmp, '.context', 'commits', (await readdir(path.join(tmp, '.context', 'commits'))).sort()[2]));
+  } else {
+    // Before V-B4b: no committed review items (uc-1 unreviewed).
+    assert.deepEqual(store.reviews, []);
+  }
 
   // B4: the exact record Kane 0.10.5 wrote in the V-B4a validation (on a disposable copy),
-  // appended to this copy, is read as one approval of uc-1, linked to record 2.
+  // appended to the V1 records, is read as one approval of uc-1, linked to record 2.
   await writeFile(path.join(tmp, '.context', 'commits', '000003-c0defa5acc39.json'), JSON.stringify(VB4A_RECORD_3));
   const s3 = await readStore(path.join(tmp, '.context'), '0.10.5');
   assert.equal(s3.ok, true, s3.problems.join(' '));

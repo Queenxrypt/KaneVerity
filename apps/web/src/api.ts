@@ -60,6 +60,13 @@ export const api = {
   reviewUseCase: (tutorialId: string, cid: string, body: { decision: 'approve' | 'reject'; reason?: string; acknowledgeGaps?: boolean }) =>
     request<UseCasesResponse>(`/assurance/usecases/${encodeURIComponent(tutorialId)}/${cid.replace(/^sha256:/, '')}/review`, { method: 'POST', body }),
   kaneWrite: (tutorialId: string, cid: string) => request<UseCasesResponse>(`/assurance/usecases/${encodeURIComponent(tutorialId)}/${cid.replace(/^sha256:/, '')}/kane-write`, { method: 'POST', body: {} }),
+  designUseCase: (tutorialId: string, cid: string, body: { confirm: { paid: true }; max?: number; acknowledgePrevious?: string }) =>
+    request<PublicJob>(`/assurance/usecases/${encodeURIComponent(tutorialId)}/${cid.replace(/^sha256:/, '')}/design`, { method: 'POST', body }),
+  // V2: a test-design job is answered (paid, re-checked) and stopped from its use case.
+  answerDesign: (tutorialId: string, cid: string, jobId: string, answers: Record<string, JobAnswer>) =>
+    request<PublicJob>(`/assurance/usecases/${encodeURIComponent(tutorialId)}/${cid.replace(/^sha256:/, '')}/design/${encodeURIComponent(jobId)}/answer`, { method: 'POST', body: { answers, confirm: { paid: true } } }),
+  cancelDesign: (tutorialId: string, cid: string, jobId: string) =>
+    request<PublicJob>(`/assurance/usecases/${encodeURIComponent(tutorialId)}/${cid.replace(/^sha256:/, '')}/design/${encodeURIComponent(jobId)}/cancel`, { method: 'POST', body: {} }),
   reconcileKaneWrite: (tutorialId: string, cid: string) => request<UseCasesResponse>(`/assurance/usecases/${encodeURIComponent(tutorialId)}/${cid.replace(/^sha256:/, '')}/reconcile`, { method: 'POST', body: {} }),
   generateRequirements: (id: string) => request<{ status: 'created' | 'unchanged'; version: RequirementsVersionMeta }>(`/assurance/requirements/${encodeURIComponent(id)}`, { method: 'POST', body: {} }),
   startRuns: (tutorialIds: string[]) => request<{ runIds: string[]; estimatedCredits: number }>('/runs', { method: 'POST', body: { tutorialIds } }),

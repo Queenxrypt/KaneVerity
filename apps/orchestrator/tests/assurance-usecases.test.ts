@@ -65,7 +65,7 @@ async function scriptReads(anchors: string[], o: { trust?: string; fsckOk?: bool
   const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/'/g, '&#39;');
   const view = {
     meta: { schema: 'assurance/context@1', tipHash: o.viewTip ?? `sha256:${H2}`, storePath: 'C:\\Users\\someone\\private' },
-    nodes: [{ cid: UC, trust: o.trust ?? 'derived' }, { cid: SRC, trust: 'derived' }],
+    nodes: [{ cid: UC, label: 'usecase', trust: o.trust ?? 'derived' }, { cid: SRC, label: 'source', trust: 'derived' }],
     edges: [{ src: SRC, dst: UC, anchors: o.viewAnchors ?? anchors }],
     contentHtml: { [UC]: `<ul class="crit">${criteria.map((c) => `<li>${esc(c)}</li>`).join('')}</ul>` },
   };

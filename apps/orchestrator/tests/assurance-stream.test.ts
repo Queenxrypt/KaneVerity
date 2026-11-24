@@ -65,16 +65,23 @@ test('malformed questions and options are dropped; a bad recommended index is ig
   assert.deepEqual(s.pause?.questions.map((q) => [q.id, q.options.map((o) => [o.label, o.input]), q.recommendedIndex, q.allowFreeText]), [['q2', [['A', false], ['B', true]], null, false]]);
 });
 
+// A design job's binding (V2): tutorial, exact content id, decision and self-declared reviewer.
+const DESIGN = { kind: 'design' as const, tutorialId: 'generate-an-api-key', ucCid: 'sha256:' + 'd'.repeat(64), reviewer: 'test-reviewer', decisionId: 'd20261124-000000-aaaaaa', acknowledgedPrevious: null };
+
 test('allow-listed commands: exact arguments, validated ids', () => {
   assert.deepEqual(buildArgs({ kind: 'ingest', tutorialId: 'generate-an-api-key' }), ['context', 'ingest', 'requirements/generate-an-api-key.md', '--as', 'kv-generate-an-api-key', '--mode', 'ci', '--local']);
   assert.deepEqual(buildArgs({ kind: 'extract', tutorialId: 'generate-an-api-key' }), ['context', 'extract', '--mode', 'agent', '--local', '--source', 'kv-generate-an-api-key']);
-  assert.deepEqual(buildArgs({ kind: 'design', useCase: 'uc-generate-a-key', max: 1 }), ['design', 'tests', '--use-case', 'uc-generate-a-key', '--mode', 'agent', '--max', '1']);
+  assert.deepEqual(buildArgs({ ...DESIGN, useCase: 'uc-generate-a-key', max: 1 }), ['design', 'tests', '--use-case', 'uc-generate-a-key', '--mode', 'agent', '--max', '1']);
+  // The binding is validated too (it never reaches the argument list).
+  assert.throws(() => buildArgs({ ...DESIGN, useCase: 'uc-1', max: 1, ucCid: 'uc-1' }), /content id/);
+  assert.throws(() => buildArgs({ ...DESIGN, useCase: 'uc-1', max: 1, reviewer: 'me@example.org' }), /reviewer/);
+  assert.throws(() => buildArgs({ ...DESIGN, useCase: 'uc-1', max: 1, tutorialId: '../x' }), /tutorial/);
   assert.deepEqual(buildArgs({ kind: 'resume', verb: 'extract', sid: 'ext-1', answers: [{ id: 'q1', value: '1' }, { id: 'q2', value: 'free words' }] }), ['context', 'extract', '--resume', 'ext-1', '--mode', 'agent', '--answer', 'q1=1', '--answer', 'q2=free words']);
   assert.deepEqual(buildArgs({ kind: 'list', inferred: true }), ['context', 'list', '--json', '--inferred']);
   assert.deepEqual(buildArgs({ kind: 'cover' }), ['cover', '--mode', 'agent']);
   for (const bad of ['../x', 'A', 'a_b', '']) assert.throws(() => sourceIdFor(bad), bad);
-  for (const uc of ['uc', '--force', 'uc-x; rm', 'UC-X', 'uc-x --allow-unreviewed']) assert.throws(() => buildArgs({ kind: 'design', useCase: uc, max: 1 }), uc);
-  for (const max of [0, 9, 1.5, NaN]) assert.throws(() => buildArgs({ kind: 'design', useCase: 'uc-a-b', max }), String(max));
+  for (const uc of ['uc', '--force', 'uc-x; rm', 'UC-X', 'uc-x --allow-unreviewed']) assert.throws(() => buildArgs({ ...DESIGN, useCase: uc, max: 1 }), uc);
+  for (const max of [0, 9, 1.5, NaN]) assert.throws(() => buildArgs({ ...DESIGN, useCase: 'uc-a-b', max }), String(max));
   for (const sid of ['', '--mode', 'a b', 'x'.repeat(200)]) assert.throws(() => buildArgs({ kind: 'resume', verb: 'extract', sid, answers: [] }), sid);
   assert.throws(() => buildArgs({ kind: 'resume', verb: 'extract', sid: 's', answers: [{ id: '--force', value: '1' }] }));
   assert.throws(() => buildArgs({ kind: 'resume', verb: 'reconcile' as never, sid: 's', answers: [] }));
