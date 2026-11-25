@@ -52,6 +52,21 @@ export const JOB_KINDS: Record<JobKind, JobKindInfo> = {
  */
 export const FORBIDDEN_FLAGS = ['--allow-unreviewed', '--allow-archive', '--force'] as const;
 
+/**
+ * The one recorded exception to FORBIDDEN_FLAGS (B5 redesign, ASSURANCE_PLAN section 13.10):
+ * a forced redesign of a use case that already has a complete design, entering at one of these
+ * phases. Kane retires only the use case's live scenarios and tests (and blocker gaps); records
+ * are never rewritten. Only a design job with an explicit, acknowledged `redesign` gets it.
+ */
+export const REDESIGN_PHASES = ['acs', 'scenarios'] as const;
+export type RedesignPhase = (typeof REDESIGN_PHASES)[number];
+export const isRedesignPhase = (v: unknown): v is RedesignPhase => typeof v === 'string' && (REDESIGN_PHASES as readonly string[]).includes(v);
+
+/** The exact words the user must send to approve a forced redesign (bound to the use-case version and phase). */
+export function redesignAcknowledgement(ucCid: string, phase: RedesignPhase): string {
+  return `I approve a forced redesign of use case ${ucCid.replace(/^sha256:/, '').slice(0, 12)} from the ${phase} phase: Kane supersedes its live scenarios and tests, and no record is deleted.`;
+}
+
 /** Id of one KaneVerity approval write (its private verdict file lives under data/assurance/kane-writes/<id>/). */
 export const WRITE_ID_PATTERN = /^w[0-9]{8}-[0-9]{6}-[a-f0-9]{6}$/;
 const CONTENT_ID = /^sha256:[a-f0-9]{64}$/;
@@ -98,7 +113,7 @@ export type JobParams =
    * id that version had at the fresh pre-start read (useCase), the KaneVerity decision it
    * relies on, and the self-declared reviewer passed to Kane as USER.
    */
-  | { kind: 'design'; tutorialId: string; ucCid: string; useCase: string; max: number; reviewer: string; decisionId: string; acknowledgedPrevious: string | null }
+  | { kind: 'design'; tutorialId: string; ucCid: string; useCase: string; max: number; reviewer: string; decisionId: string; acknowledgedPrevious: string | null; /** B5: the acknowledged forced redesign, or absent. */ redesign?: { phase: RedesignPhase; acknowledgement: string } | null }
   /** A design session's resume carries the same binding (ucCid, decisionId, reviewer). */
   | { kind: 'resume'; verb: 'extract' | 'design'; sid: string; answers: { id: string; value: string }[]; ucCid?: string; decisionId?: string; reviewer?: string }
   | { kind: 'list'; inferred: boolean }
@@ -114,7 +129,16 @@ export type JobParams =
 /** The exact Kane CLI arguments for a job (after `node kane-cli.cjs`). */
 export function buildArgs(p: JobParams): string[] {
   const args = argsFor(p);
-  for (const a of args) if ((FORBIDDEN_FLAGS as readonly string[]).includes(a)) throw new CommandError(`KaneVerity never passes ${a} to Kane.`);
+  // The only exception: an acknowledged forced redesign passes --force, once, as
+  // "--force --phase <acs|scenarios>" at the very end of a design command.
+  const redesign = p.kind === 'design' && p.redesign ? p.redesign : null;
+  const tail = redesign ? args.slice(-3) : [];
+  const allowed = redesign !== null && isRedesignPhase(redesign.phase) && redesign.acknowledgement === redesignAcknowledgement(p.kind === 'design' ? p.ucCid : '', redesign.phase) && tail[0] === FORBIDDEN_FLAGS[2] && tail[1] === '--phase' && tail[2] === redesign.phase;
+  args.forEach((a, i) => {
+    if (!(FORBIDDEN_FLAGS as readonly string[]).includes(a)) return;
+    if (allowed && a === FORBIDDEN_FLAGS[2] && i === args.length - 3) return;
+    throw new CommandError(`KaneVerity never passes ${a} to Kane.`);
+  });
   return args;
 }
 
@@ -146,7 +170,8 @@ function argsFor(p: JobParams): string[] {
       kaneUserFor(p.reviewer);
       if (!LOGICAL_ID.test(p.useCase) || p.useCase.length > 120) throw new CommandError('Invalid use-case reference.');
       if (!Number.isInteger(p.max) || p.max < 1 || p.max > 8) throw new CommandError('max must be a whole number from 1 to 8.');
-      return ['design', 'tests', '--use-case', p.useCase, '--mode', 'agent', '--max', String(p.max)];
+      if (p.redesign && !isRedesignPhase(p.redesign.phase)) throw new CommandError('A forced redesign may start only at the acs or scenarios phase.');
+      return ['design', 'tests', '--use-case', p.useCase, '--mode', 'agent', '--max', String(p.max), ...(p.redesign ? [FORBIDDEN_FLAGS[2], '--phase', p.redesign.phase] : [])];
     case 'resume': {
       if (!SESSION_ID.test(p.sid)) throw new CommandError('Invalid session id.');
       const base = p.verb === 'extract' ? ['context', 'extract'] : p.verb === 'design' ? ['design', 'tests'] : null;

@@ -447,6 +447,7 @@ export interface DesignReviewResponse {
     tests: DesignTestView[];
     gaps: DesignGapView[];
     strayTestFiles: { path: string; id: string | null }[];
+    supersededTestFiles?: { path: string; sha256: string; id: string; testCid: string; supersededInSeq: number; successor: string | null }[];
     variables: { path: string; sha256: string | null; appUrlDeclared: boolean; appUrlHasValue: boolean };
   };
   documented?: { steps: { item: string; text: string; labels: string[]; source: string }[]; outcomes: { item: string; text: string; labels: string[]; source: string }[] };

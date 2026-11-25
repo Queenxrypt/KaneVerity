@@ -17,6 +17,15 @@ export const AC_TEXT = {
   message: "After generating the key, the message 'API key generated successfully.' appears.",
 };
 
+/** The criteria as Kane 0.10.5 recorded them in the real store (record #4). */
+export const AC_GEN1 = {
+  list: { text: AC_TEXT.list, kind: 'presence', risk: 'high', derived: true, expected_answer: { kind: 'presence', operator: 'exists', operand: 'the newly generated key in the API keys list', baseline: null } },
+  count: { text: AC_TEXT.count, kind: 'absolute', risk: 'high', derived: true, expected_answer: { kind: 'absolute', operator: 'equals', operand: '2 keys', baseline: null } },
+  message: { text: AC_TEXT.message, kind: 'presence', risk: 'high', derived: true, expected_answer: { kind: 'presence', operator: 'exists', operand: 'API key generated successfully.', baseline: null } },
+};
+/** O2's criterion re-sent by a redesign from the acs phase: the same text, now a before/after (delta) criterion. */
+export const AC_LIST_DELTA = { text: AC_TEXT.list, kind: 'delta', risk: 'high', derived: true, expected_answer: { kind: 'delta', operator: 'changed-by', operand: '1', baseline: 'the keys in the API keys list before generating' } };
+
 export interface DesignIds {
   ac1: string; // list (O2)
   ac2: string; // count (O3)
@@ -52,10 +61,9 @@ function test(title: string, body: string, check: Record<string, unknown>, objec
 
 /** Generation 1 (records 4-7 after the use-case records): one scenario, one test, one gap. */
 export function generation1(uc: string): { records: Record<string, unknown>[]; ids: DesignIds } {
-  const ac = (text: string) => ({ text, kind: 'presence', risk: 'high', derived: true });
-  const a1 = ac(AC_TEXT.list);
-  const a2 = ac(AC_TEXT.count);
-  const a3 = ac(AC_TEXT.message);
+  const a1 = AC_GEN1.list;
+  const a2 = AC_GEN1.count;
+  const a3 = AC_GEN1.message;
   const ac1 = cidOf('ac', a1);
   const ac2 = cidOf('ac', a2);
   const ac3 = cidOf('ac', a3);
@@ -82,13 +90,25 @@ const NAV = "## Step 1\n\nIn a fresh browser session, start at {{app_url}}/ and 
 
 export const GEN2_BODIES = {
   message: `# Check the success message\n\n> One outcome.\n\n${NAV}\n## Step 3 @verifies ac-3\n\nUse 'Generate Key', then assert the message 'API key generated successfully.' appears.\n`,
-  list: `# Check the new key in the list\n\n> One outcome.\n\n${NAV}\n## Step 3\n\ncapture baseline: the rows of the API keys list\n\n## Step 4 @verifies ac-1\n\nUse 'Generate Key', then assert the API keys list has exactly one row more than the captured baseline.\n`,
+  list: `# Check the new key in the list\n\n> One outcome.\n\n${NAV}\n## Step 3\n\ncapture baseline: the rows of the API keys list\n\n## Step 4 @verifies ac-4\n\nUse 'Generate Key', then assert every key captured in the baseline is still in the API keys list and exactly one new key was added.\n`,
   count: `# Check the key count\n\n> One outcome.\n\n${NAV}\n## Step 3 @verifies ac-2\n\nUse 'Generate Key', then assert the key count below the list shows '2 keys'.\n`,
 };
 
-/** A forced redesign from the scenarios phase: generation 2 with three one-outcome scenario/test pairs. */
-export function generation2(uc: string, g1: DesignIds, opts: { bodies?: Partial<typeof GEN2_BODIES>; checks?: Partial<Record<'message' | 'list' | 'count', Record<string, unknown>>> } = {}) {
-  const bodies = { ...GEN2_BODIES, ...opts.bodies };
+/**
+ * A forced redesign: generation 2 with three one-outcome scenario/test pairs. By default it
+ * starts at the acs phase (the planned command) and re-sends O2's criterion with the same text
+ * as a delta criterion, so Kane supersedes ac-1 with ac-4 ("AC re-emitted with changed content
+ * (text-matched successor)"); ac-2 and ac-3 are re-sent unchanged (the same content ids, no new
+ * nodes). With from: 'scenarios', criteria are not touched and ac-1 stays a presence criterion.
+ * With acText, O2's criterion is re-sent with different text: Kane adds it and keeps ac-1 live.
+ */
+export function generation2(uc: string, g1: DesignIds, opts: { bodies?: Partial<typeof GEN2_BODIES>; checks?: Partial<Record<'message' | 'list' | 'count', Record<string, unknown>>>; from?: 'acs' | 'scenarios'; acText?: string } = {}) {
+  const from = opts.from ?? 'acs';
+  const newAc = from === 'acs' ? (opts.acText ? { ...AC_LIST_DELTA, text: opts.acText } : AC_LIST_DELTA) : null;
+  const ac4 = newAc ? cidOf('ac', newAc) : null;
+  const listAc = ac4 ?? g1.ac1;
+  const listSlug = ac4 ? 'ac-4' : 'ac-1';
+  const bodies = { ...GEN2_BODIES, ...(ac4 ? {} : { list: GEN2_BODIES.list.replace('@verifies ac-4', '@verifies ac-1') }), ...opts.bodies };
   const scen = (title: string) => ({ title, intent: 'One documented outcome.', case_type: 'happy', derived: true });
   const s2 = scen('Success message after generating a key');
   const s3 = scen('New key added to the list');
@@ -97,7 +117,7 @@ export function generation2(uc: string, g1: DesignIds, opts: { bodies?: Partial<
   const sc3 = cidOf('scenario', s3);
   const sc4 = cidOf('scenario', s4);
   const tm = test('Check the success message', bodies.message, opts.checks?.message ?? { kind: 'presence', operator: 'exists', operand: 'API key generated successfully.', baseline: null, verified_against: 'ac-3', expected_mode: 'authored' }, 'objectives:\n  - objective: a\n    step: 1\n');
-  const tl = test('Check the new key in the list', bodies.list, opts.checks?.list ?? { kind: 'delta', operator: 'changed-by', operand: '1', baseline: 'rows of the API keys list', verified_against: 'ac-1', expected_mode: 'authored' }, 'objectives:\n  - objective: a\n    step: 1\n  - objective: capture\n    step: 3\n    baseline: true\n');
+  const tl = test('Check the new key in the list', bodies.list, opts.checks?.list ?? { kind: 'delta', operator: 'changed-by', operand: '1', baseline: 'rows of the API keys list', verified_against: listSlug, expected_mode: 'authored' }, 'objectives:\n  - objective: a\n    step: 1\n  - objective: capture\n    step: 3\n    baseline: true\n');
   const tc = test('Check the key count', bodies.count, opts.checks?.count ?? { kind: 'absolute', operator: 'equals', operand: '2 keys', baseline: null, verified_against: 'ac-2', expected_mode: 'authored' }, 'objectives:\n  - objective: a\n    step: 1\n');
   const t2 = cidOf('test', tm.content);
   const t3 = cidOf('test', tl.content);
@@ -105,15 +125,30 @@ export function generation2(uc: string, g1: DesignIds, opts: { bodies?: Partial<
   const phase = (p: string) => ({ design_phase: { uc_root: uc, generation: 2, phase: p, completeness: 'complete', payload_digest: 'sha256:' + '1'.repeat(64) }, intent_verb: 'design', created_by: { build: '0.10.5', by } });
   const e = (type: string, src: string, dst: string) => ({ ecid: `sha256:${sha(type + src + dst)}`, type, src, dst, props: {} });
   const sup = (old: string) => ({ kind: 'node', old, new: null, reason: '--force redesign of uc-1 by design-agent', by });
+  const genStart = { design_generation: { uc_root: uc, uc_cid: uc, generation: 2, supersedes_generation: 1, because: 'forced redesign (--force)' } };
+  const acsRecord = newAc
+    ? [
+        {
+          ...phase('acs'),
+          ...genStart,
+          nodes: [{ cid: ac4!, label: 'ac', content: newAc }],
+          edges: [e('scoped_to', ac4!, uc)],
+          // Kane supersedes a live criterion re-sent with the same text (normalised) and changed content.
+          supersessions: newAc.text === AC_TEXT.list ? [{ kind: 'node', old: g1.ac1, new: ac4, reason: 'AC re-emitted with changed content by design-agent (text-matched successor)', by }] : [],
+          names: [{ cid: ac4!, slug: 'ac-4', by }],
+        },
+      ]
+    : [];
   return {
-    ids: { sc2, sc3, sc4, t2, t3, t4, defs: { message: tm.definitionId, list: tl.definitionId, count: tc.definitionId }, bodies },
+    ids: { sc2, sc3, sc4, t2, t3, t4, ac4, listAc, defs: { message: tm.definitionId, list: tl.definitionId, count: tc.definitionId }, bodies },
     records: [
-      { ...phase('scenarios'), design_generation: { uc_root: uc, uc_cid: uc, generation: 2, supersedes_generation: 1, because: 'one scenario per outcome' }, nodes: [{ cid: sc2, label: 'scenario', content: s2 }, { cid: sc3, label: 'scenario', content: s3 }, { cid: sc4, label: 'scenario', content: s4 }], edges: [e('belongs_to', sc2, uc), e('belongs_to', sc3, uc), e('belongs_to', sc4, uc)], supersessions: [sup(g1.sc1)], names: [{ cid: sc2, slug: 'sc-2', by }, { cid: sc3, slug: 'sc-3', by }, { cid: sc4, slug: 'sc-4', by }] },
-      { ...phase('wiring'), nodes: [], edges: [e('exercises', sc2, g1.ac3), e('exercises', sc3, g1.ac1), e('exercises', sc4, g1.ac2)] },
+      ...acsRecord,
+      { ...phase('scenarios'), ...(newAc ? {} : genStart), nodes: [{ cid: sc2, label: 'scenario', content: s2 }, { cid: sc3, label: 'scenario', content: s3 }, { cid: sc4, label: 'scenario', content: s4 }], edges: [e('belongs_to', sc2, uc), e('belongs_to', sc3, uc), e('belongs_to', sc4, uc)], supersessions: [sup(g1.sc1)], names: [{ cid: sc2, slug: 'sc-2', by }, { cid: sc3, slug: 'sc-3', by }, { cid: sc4, slug: 'sc-4', by }] },
+      { ...phase('wiring'), nodes: [], edges: [e('exercises', sc2, g1.ac3), e('exercises', sc3, listAc), e('exercises', sc4, g1.ac2)] },
       {
         ...phase('tests'),
         nodes: [{ cid: t2, label: 'test', content: tm.content }, { cid: t3, label: 'test', content: tl.content }, { cid: t4, label: 'test', content: tc.content }],
-        edges: [e('automates', t2, sc2), e('verifies', t2, g1.ac3), e('automates', t3, sc3), e('verifies', t3, g1.ac1), e('automates', t4, sc4), e('verifies', t4, g1.ac2)],
+        edges: [e('automates', t2, sc2), e('verifies', t2, g1.ac3), e('automates', t3, sc3), e('verifies', t3, listAc), e('automates', t4, sc4), e('verifies', t4, g1.ac2)],
         supersessions: [sup(g1.t1)],
         names: [{ cid: t2, slug: 't-2', by }, { cid: t3, slug: 't-3', by }, { cid: t4, slug: 't-4', by }],
       },
@@ -237,7 +272,7 @@ export const LOCATORS = {
  * status region, O2 a new key: the whole list read before and after (nothing lost, one added), O3 the exact
  * count read from the count element.
  */
-export function goodMembers(defs: { message: string; list: string; count: string }, origin: string): PackMember[] {
+export function goodMembers(defs: { message: string; list: string; count: string }, origin: string, listSlug = 'ac-4'): PackMember[] {
   const nav = (n: string): PackStep[] => [
     { ordinal: 1, kind: 'navigate', actionId: `${n}-1`, url: origin + '/' },
     { ordinal: 2, kind: 'click', actionId: `${n}-2` },
@@ -256,7 +291,7 @@ export function goodMembers(defs: { message: string; list: string; count: string
     {
       name: 'check-the-new-key-in-the-list-bbbb',
       definitionId: defs.list,
-      steps: [...nav('l'), { ordinal: 5, kind: 'assert', actionId: 'l-5', verifies: ['ac-1'] }],
+      steps: [...nav('l'), { ordinal: 5, kind: 'assert', actionId: 'l-5', verifies: [listSlug] }],
       ops: [assertionOp('l-5', 'new_key', 'demo_fake_key_0002', 'demo_fake_key_0002')],
       // The whole list before the action (step 3), the new key and the whole list after it (step 5).
       actions: [

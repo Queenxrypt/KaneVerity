@@ -23,7 +23,7 @@ import { config } from '../config.ts';
 import { kaneLock, type KaneLock } from '../kane/lock.ts';
 import { addCredits, dataPath, readJson, writeJson, type CostBasis } from '../store.ts';
 import { findLeaks, scrub, scrubDeep } from '../verify/redact.ts';
-import { buildArgs, CommandError, isJobKind, JOB_KINDS, kaneUserFor, parseBalance, parseIngestReceipt, requirementsFileFor, validateAnswers, type JobKind, type JobParams } from './commands.ts';
+import { type RedesignPhase, buildArgs, CommandError, isJobKind, JOB_KINDS, kaneUserFor, parseBalance, parseIngestReceipt, requirementsFileFor, validateAnswers, type JobKind, type JobParams } from './commands.ts';
 import { AssuranceError, RequirementsService } from './service.ts';
 import { isTutorialId } from './store.ts';
 import { applyAssuranceLine, emptyAssuranceStream, outcomeOf, type ParsedAssuranceStream, type PendingQuestion } from './stream.ts';
@@ -252,12 +252,12 @@ export class AssuranceJobs extends EventEmitter {
    * explicit confirmation, like every paid command. Just before Kane starts, the design
    * preflight re-checks KaneVerity's own state (the job may have waited in the queue).
    */
-  async startDesign(p: { tutorialId: string; ucCid: string; useCase: string; max: number; reviewer: string; decisionId: string; acknowledgedPrevious: string | null; requirements: JobRecord['requirements']; confirm: unknown }): Promise<JobRecord> {
+  async startDesign(p: { tutorialId: string; ucCid: string; useCase: string; max: number; reviewer: string; decisionId: string; acknowledgedPrevious: string | null; redesign?: { phase: RedesignPhase; acknowledgement: string } | null; requirements: JobRecord['requirements']; confirm: unknown }): Promise<JobRecord> {
     this.gate('design', p.confirm);
     if (!isTutorialId(p.tutorialId)) throw new AssuranceError(404, 'Tutorial not found.');
     const busy = [...this.records.values()].find((j) => j.tutorialId === p.tutorialId && (j.state === 'queued' || j.state === 'running'));
     if (busy) throw new AssuranceError(409, `A job for this tutorial is already ${busy.state}.`);
-    const params: JobParams = { kind: 'design', tutorialId: p.tutorialId, ucCid: p.ucCid, useCase: p.useCase, max: p.max, reviewer: p.reviewer, decisionId: p.decisionId, acknowledgedPrevious: p.acknowledgedPrevious };
+    const params: JobParams = { kind: 'design', tutorialId: p.tutorialId, ucCid: p.ucCid, useCase: p.useCase, max: p.max, reviewer: p.reviewer, decisionId: p.decisionId, acknowledgedPrevious: p.acknowledgedPrevious, ...(p.redesign ? { redesign: { phase: p.redesign.phase, acknowledgement: p.redesign.acknowledgement } } : {}) };
     return this.enqueue('design', params, p.tutorialId, p.requirements, null);
   }
 

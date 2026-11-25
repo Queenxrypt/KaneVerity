@@ -302,8 +302,166 @@ test('a design: fresh checks, then the exact command with USER, bound to the tut
   assert.match(uc.testDesign.blockedBy, /already has a test design/);
   const again = await design();
   assert.equal(again.status, 409);
-  assert.match((await j(again)).error, /already has a test design.*--force/);
+  assert.match((await j(again)).error, /already has a test design.*needs an acknowledged forced redesign/);
   assert.equal((await designCalls()).length, 1);
+});
+
+test('B5 redesign exception: only an acknowledged --force --phase acs|scenarios over a complete design; paid gates unchanged', async () => {
+  const { redesignAcknowledgement, buildArgs } = await import('../src/assurance/commands.ts');
+  const { config } = await import('../src/config.ts');
+  await approvedAndVerified();
+  const words = (phase: 'acs' | 'scenarios') => redesignAcknowledgement(UC, phase);
+  // Nothing to replace yet: a redesign is refused before any Kane command.
+  let before = (await designCalls()).length;
+  let r = await design({ ...PAID, redesign: { phase: 'acs', acknowledgement: words('acs') } });
+  assert.equal(r.status, 409);
+  assert.match((await j(r)).error, /needs a complete test design of this use case to replace/);
+  // A first, ordinary design.
+  const first = await j(await design());
+  assert.equal((await waitJob(first.jobId)).state, 'complete');
+  assert.equal((await designCalls()).length, before + 1);
+  before = (await designCalls()).length;
+  // Refused, at no cost: a phase outside the exception, a missing or altered acknowledgement, no paid confirmation, mode free.
+  for (const [body, status, msg] of [
+    [{ ...PAID, redesign: { phase: 'tests', acknowledgement: words('acs') } }, 400, /must be "acs" or "scenarios"/],
+    [{ ...PAID, redesign: { phase: 'grounding', acknowledgement: words('acs') } }, 400, /must be "acs" or "scenarios"/],
+    [{ ...PAID, redesign: { phase: 'acs' } }, 400, /exact acknowledgement/],
+    [{ ...PAID, redesign: { phase: 'acs', acknowledgement: words('scenarios') } }, 400, /exact acknowledgement/],
+    [{ ...PAID, redesign: { phase: 'acs', acknowledgement: words('acs') + ' ' } }, 400, /exact acknowledgement/],
+    [{ redesign: { phase: 'acs', acknowledgement: words('acs') } }, 400, /uses Kane credits/],
+  ] as const) {
+    r = await design(body);
+    assert.equal(r.status, status, JSON.stringify(body));
+    assert.match((await j(r)).error, msg);
+  }
+  config.assurance.mode = 'free';
+  try {
+    r = await design({ ...PAID, redesign: { phase: 'acs', acknowledgement: words('acs') } });
+    assert.equal(r.status, 403);
+  } finally {
+    config.assurance.mode = 'all';
+  }
+  assert.equal((await designCalls()).length, before, 'no Kane design command for any refused request');
+  // The acknowledged redesign: exactly "--force --phase acs" at the end, nothing else forbidden.
+  r = await design({ ...PAID, max: 3, redesign: { phase: 'acs', acknowledgement: words('acs') } });
+  assert.equal(r.status, 202, JSON.stringify(await r.clone().json()));
+  const job = await j(r);
+  assert.deepEqual(job.params.redesign, { phase: 'acs', acknowledgement: words('acs') });
+  assert.equal((await waitJob(job.jobId)).state, 'complete');
+  const argv = (await designCalls()).pop()!.argv;
+  assert.deepEqual(argv, ['design', 'tests', '--use-case', 'uc-1', '--mode', 'agent', '--max', '3', '--force', '--phase', 'acs']);
+  for (const f of ['--allow-unreviewed', '--allow-archive']) assert.ok(!argv.includes(f), f);
+  // buildArgs itself refuses --force without the exact acknowledgement, or for any other kind.
+  const p = { kind: 'design' as const, tutorialId: T, ucCid: UC, useCase: 'uc-1', max: 3, reviewer: REVIEWER, decisionId: 'd20261125-000000-aaaaaa', acknowledgedPrevious: null };
+  assert.throws(() => buildArgs({ ...p, redesign: { phase: 'acs', acknowledgement: 'yes' } }), /never passes --force/);
+  assert.throws(() => buildArgs({ ...p, redesign: { phase: 'tests' as 'acs', acknowledgement: words('acs') } }), /acs or scenarios/);
+  assert.deepEqual(buildArgs({ ...p, redesign: { phase: 'scenarios', acknowledgement: words('scenarios') } }).slice(-3), ['--force', '--phase', 'scenarios']);
+  assert.ok(!buildArgs(p).includes('--force'), 'an ordinary design never gets --force');
+});
+
+test('a redesign after a failed, interrupted or expired attempt is refused: an incomplete or unknown outcome needs a separate recovery decision', async () => {
+  const { redesignAcknowledgement } = await import('../src/assurance/commands.ts');
+  const { AssuranceJobs } = await import('../src/assurance/jobs.ts');
+  await approvedAndVerified();
+  const REDESIGN = { ...PAID, max: 3, redesign: { phase: 'acs', acknowledgement: redesignAcknowledgement(UC, 'acs') } };
+  const decisionId = (await view()).useCases[0].review.history[0].id;
+  const first = await j(await design());
+  assert.equal((await waitJob(first.jobId)).state, 'complete');
+  const refusedLike = async (jobId: string, state: string) => {
+    const before = (await designCalls()).length;
+    for (const body of [REDESIGN, { ...REDESIGN, acknowledgePrevious: jobId }]) {
+      const r = await design(body);
+      assert.equal(r.status, 409);
+      const error = (await j(r)).error as string;
+      assert.ok(error.includes(`(job ${jobId}, ${state}) ended with an incomplete or unknown outcome`), error);
+      assert.match(error, /Kane may hold part of a design/);
+      assert.match(error, /recovering needs a separate, recorded decision/);
+      assert.match(error, /Nothing was started and no credits were used/);
+      assert.doesNotMatch(error, /there is none/, 'a design exists; only the last attempt is unknown');
+    }
+    assert.equal((await designCalls()).length, before, 'no Kane design command, nothing retried');
+  };
+  // A design job record as the job runner writes it, newer than the complete design.
+  const writeJob = async (id: string, minutes: number, state: string, pause: unknown) => {
+    const dir = path.join(work, 'data', 'assurance', 'jobs', id);
+    await mkdir(path.join(dir, 'private'), { recursive: true });
+    const at = new Date(Date.now() + minutes * 60_000).toISOString();
+    await writeFile(path.join(dir, 'job.json'), JSON.stringify({ jobId: id, kind: 'design', params: { kind: 'design', tutorialId: T, ucCid: UC, useCase: 'uc-1', max: 3, reviewer: REVIEWER, decisionId, acknowledgedPrevious: null, redesign: REDESIGN.redesign }, tutorialId: T, state, reason: 'Kane is running.', createdAt: at, startedAt: at, finishedAt: null, args: [], exitCode: null, cliVersion: '0.10.5', verb: 'design', doneStatus: null, next: [], pause, parentJobId: null, resumedBy: null, requirements: null, credits: { amount: null, basis: null, reportedTotal: null, measured: null, balanceBefore: null, balanceAfter: null }, summary: { ingested: [], commits: [], warnings: [], errors: [], held: 0, messages: [], unknownEventTypes: [], nonJsonLines: 0, invalidLines: 0 } }));
+  };
+
+  // 1. A redesign that failed (Kane exited with an error).
+  await setScript({ stdout: DESIGN_ERROR, exit: 1 });
+  const failed = await j(await design(REDESIGN));
+  assert.equal((await waitJob(failed.jobId)).state, 'error');
+  await setScript();
+  await refusedLike(failed.jobId, 'error');
+
+  // 2. A redesign that was running when the orchestrator stopped (marked interrupted on start-up).
+  const interrupted = 'j20261125-020202-abcdef';
+  await writeJob(interrupted, 1, 'running', null);
+  await new AssuranceJobs().init();
+  assert.equal(JSON.parse(await readFile(path.join(work, 'data', 'assurance', 'jobs', interrupted, 'job.json'), 'utf8')).state, 'interrupted');
+  await refusedLike(interrupted, 'interrupted');
+
+  // 3. A redesign paused with Kane's questions whose session expired.
+  const expired = 'j20261125-030303-abcdef';
+  await writeJob(expired, 2, 'paused', { sid: SID, expiresAt: new Date(Date.now() - 60_000).toISOString(), questions: [], crashed: false, held: null });
+  await refusedLike(expired, 'paused and expired');
+});
+
+test('a redesign after a request refused before Kane started says so: the complete design is intact, no credits were used; one Kane itself refused keeps the recovery message', async () => {
+  const { redesignAcknowledgement } = await import('../src/assurance/commands.ts');
+  const { AssuranceJobs } = await import('../src/assurance/jobs.ts');
+  await approvedAndVerified();
+  const ack = redesignAcknowledgement(UC, 'acs');
+  const REDESIGN = { ...PAID, max: 3, redesign: { phase: 'acs', acknowledgement: ack } };
+  const decisionId = (await view()).useCases[0].review.history[0].id;
+  const first = await j(await design());
+  assert.equal((await waitJob(first.jobId)).state, 'complete');
+
+  // 1. A redesign request the run-time preflight refused: Kane's design never ran.
+  const jobs = new AssuranceJobs();
+  jobs.setDesignPreflight(async () => 'the KaneVerity decision changed since the design was requested.');
+  const before = (await calls()).length;
+  const job = await jobs.startDesign({ tutorialId: T, ucCid: UC, useCase: 'uc-1', max: 3, reviewer: REVIEWER, decisionId, acknowledgedPrevious: null, redesign: { phase: 'acs', acknowledgement: ack }, requirements: null, confirm: PAID.confirm });
+  let done = job;
+  for (let i = 0; i < 200 && (done.state === 'queued' || done.state === 'running'); i++) {
+    await new Promise((r) => setTimeout(r, 50));
+    done = await jobs.get(job.jobId);
+  }
+  assert.equal(done.state, 'refused');
+  assert.equal(done.exitCode, null, 'Kane never ran');
+  assert.ok(!(await calls()).slice(before).some((c) => c.argv[0] === 'design'), 'no design command');
+  const n = (await designCalls()).length;
+  for (const body of [REDESIGN, { ...REDESIGN, acknowledgePrevious: job.jobId }]) {
+    const r = await design(body);
+    assert.equal(r.status, 409, 'still refused: the safeguards and refusal behaviour are unchanged');
+    const error = (await j(r)).error as string;
+    assert.ok(error.includes(`(job ${job.jobId}) was refused before Kane started`), error);
+    assert.match(error, /Kane's design did not run, no credits were used, and the existing complete design is intact/);
+    assert.match(error, /needs a separate, recorded decision/);
+    assert.doesNotMatch(error, /there is none|incomplete or unknown outcome|may hold part of a design/);
+  }
+  assert.equal((await designCalls()).length, n, 'nothing ran');
+  // Unchanged V2 behaviour: an ordinary design after a refused request is not blocked by it.
+  const plain = await design();
+  assert.equal(plain.status, 202, JSON.stringify(await plain.clone().json()));
+  assert.equal((await waitJob((await j(plain)).jobId)).state, 'complete');
+
+  // 2. A redesign Kane itself refused after it started (exit 2): its outcome is not known to KaneVerity.
+  await setScript({ stdout: [env({ type: 'run_start', mode: 'agent' }), env({ type: 'gate_refused', code: 'GENERATION_LIVE', message: 'uc-1 already has a live design', final: true }), env({ type: 'done', status: 'refused', exit_code: 2 })], exit: 2 });
+  const kaneRefused = await j(await design(REDESIGN));
+  assert.equal(kaneRefused.state === 'queued' || kaneRefused.state === 'running', true, JSON.stringify(kaneRefused));
+  const kr = await waitJob(kaneRefused.jobId);
+  await setScript();
+  assert.equal(kr.state, 'refused');
+  assert.equal(kr.exitCode, 2, 'Kane ran');
+  const r = await design(REDESIGN);
+  assert.equal(r.status, 409);
+  const error = (await j(r)).error as string;
+  assert.ok(error.includes(`(job ${kaneRefused.jobId}, refused by Kane after it started) ended with an incomplete or unknown outcome`), error);
+  assert.match(error, /recovering needs a separate, recorded decision/);
+  assert.doesNotMatch(error, /before Kane started|there is none/);
 });
 
 test('the logical id comes from the fresh read: a second use case is designed by its own id', async () => {

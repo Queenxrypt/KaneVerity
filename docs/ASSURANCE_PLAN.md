@@ -681,7 +681,8 @@ From the help text, the installed code and free reads; none of it from a paid ru
 ### 13.6 Next (each needs its own approval)
 
 1. **Forced redesign** for one scenario per outcome (sequence in section 13.7):
-   `design tests --use-case uc-1 --mode agent --max 3 --force --phase scenarios`.
+   `design tests --use-case uc-1 --mode agent --max 3 --force --phase acs` (revised in section
+   13.10: `acs`, not `scenarios`, so O2's criterion can be replaced).
    Paid; it needs a one-off, recorded exception to the rule that `--force` is never passed, and
    KaneVerity's design runner does not pass `--force` or `--phase` today, so that exception has to
    be built and approved first. The agent may still not produce three single-outcome scenarios;
@@ -934,3 +935,80 @@ status, never as verified.
     also blocks the next verification).
   - A test file changed by an authoring run blocks, and its recordings cannot be approved.
   - Interrupted and restarted runs.
+
+### 13.10 Redesign preparation: the O2 criterion, superseded test files, the `--force` exception (built 2026-11-25; no paid command run)
+
+Read-only inspection of the real store (on a disposable copy, free `context list` and
+`context view` only) and of Kane 0.10.5's installed code. Nothing was written to the real store.
+
+**The real design today (records #1–#7):** ac-1 (O2) is a `presence` criterion
+(`exists · the newly generated key in the API keys list`), ac-2 (O3) is `absolute equals '2 keys'`,
+ac-3 (O1) is `presence`. One scenario (sc-1) exercises all three; one test (t-1) verifies all
+three, with one `presence` check against ac-1. B5 blocks it on structure (1 scenario and 1 test
+for 3 outcomes) and on every outcome.
+
+**How Kane replaces criteria (verified in its design committer):**
+
+- `--force` retires only the use case's live scenarios, the tests that automate them, and some
+  blocker gaps. **Criteria are never in its scope.**
+- In any design commit, Kane compares the use case's live criteria with the ones the agent
+  sends, by **normalised text** (lower case, trimmed, spaces collapsed). If exactly one live
+  criterion and one new criterion have the same text but different content (for example a new
+  kind), the old one is **superseded** by the new one ("AC re-emitted with changed content
+  (text-matched successor)").
+- If the text differs, the new criterion is added and the old one **stays live**: two live
+  criteria for one outcome. A criterion re-sent unchanged keeps its content id (no new item).
+- `context review` cannot change a criterion's kind (an `edited` verdict changes only title,
+  summary and risk), and archiving one needs `--allow-archive`, which stays forbidden.
+
+**So the redesign starts at the acs phase**, where the agent sends the criteria again. B5 now
+refuses anything that is not a clean before/after criterion for O2:
+
+- O2's criterion must be a `delta` or `state-transition` criterion. A `presence` criterion
+  (ac-1 today) is refused, and so is a criterion with no recorded kind.
+- Every test's check kind must equal its criterion's kind, so a criterion and its test cannot
+  contradict each other. `count` is no longer accepted for O2: it cannot show that every earlier
+  key is still listed.
+- Duplicates are already refused: exactly one live criterion per outcome (structure), and every
+  live criterion must map to exactly one outcome (mapping).
+- So only the text-matched successor path passes: ac-1 re-sent with the same text as a delta
+  criterion, superseded by its successor (ac-4 in the tests). ac-1 and its history stay in the
+  store; the approved use case, records #1–#7 and every KaneVerity history are untouched.
+
+**Superseded test files (verified in Kane's code):** Kane never deletes a replaced test's
+`*_test.md`. After a design it reports them (`replaced: [{test, file, replaced_by}]`, "test files
+here were replaced and won't run any more"). B5 now distinguishes:
+
+- **Superseded and kept:** a file whose pin names a test of this use case that the store marks
+  superseded, exactly (its `id` is that test's short id and its `base` is that test's
+  definition). Listed as a note with its record and successor; never passed to Kane; not a stray
+  file.
+- **Stray:** any other file no live test claims (including a file with a superseded test's id
+  but another definition). It blocks, as before.
+- **Fingerprinted:** kept files are part of the dry-run binding (a change needs a new dry run),
+  the run's pre-execution fingerprint, the preflight right before Kane starts, and the
+  post-run mutation check. The set of files on disk must be exactly the approved files plus the
+  kept files.
+- **Never deleted by KaneVerity.** Removing one needs an explicit, recorded cleanup decision,
+  which is not part of B5.
+
+**The `--force` exception (built, tested with the fake Kane CLI only):**
+
+- `POST …/usecases/:tutorialId/:ucHex/design` accepts
+  `{"confirm": {"paid": true}, "max": 3, "redesign": {"phase": "acs" | "scenarios", "acknowledgement": "<exact text>"}}`.
+- The acknowledgement is bound to the use-case version and the phase:
+  `I approve a forced redesign of use case <first 12 hex of its content id> from the <phase>
+  phase: Kane supersedes its live scenarios and tests, and no record is deleted.`
+- Refused before any Kane command: another phase (`grounding`, `wiring`, `tests`), a missing or
+  altered acknowledgement, no paid confirmation, mode not `all`, or no complete design to
+  replace. Every existing gate still applies (approved and verified use case, fresh read,
+  current requirements, no unknown write, nothing in progress, the run-time preflight).
+- `buildArgs` passes `--force` only for such a design job, once, as `--force --phase <phase>` at
+  the very end. `--allow-unreviewed` and `--allow-archive` stay forbidden everywhere.
+
+**Tests:** `assurance-design.test.ts` (the exception's gates and exact arguments),
+`assurance-design-check.test.ts` (criterion kinds, contradictions, superseded vs stray files),
+`assurance-design-review.test.ts` (the acs-phase successor path, the scenarios path refused, a
+re-sent criterion with new text refused as a duplicate, a mis-pinned copy refused as stray),
+`assurance-design-execution.test.ts` (a kept file is never run, never blocks, and any change to
+it blocks).

@@ -36,7 +36,14 @@ export interface DesignItemBase {
 export interface AcItem extends DesignItemBase {
   label: 'ac';
   text: string;
+  /** Kane's criterion kind (presence, absolute, delta, state-transition, ...), as recorded. */
+  kind?: string | null;
+  /** Kane's expected answer for the criterion ({kind, operator, operand, baseline}), as recorded. */
+  expectedAnswer?: { kind: string | null; operator: string | null; operand: string | null; baseline: unknown } | null;
 }
+
+/** Check kinds that compare with a captured starting state (Kane: they need a baseline-capture step). */
+export const CHANGE_KINDS = ['delta', 'state-transition'];
 
 export interface ScenarioItem extends DesignItemBase {
   label: 'scenario';
@@ -126,8 +133,15 @@ export interface DesignSnapshot {
   scenarios: ScenarioItem[];
   tests: TestItem[];
   gaps: GapItem[];
-  /** *_test.md files that belong to no live test of this use case. */
+  /** *_test.md files that belong to no live test of this use case, and are not a superseded test's file. */
   strayTestFiles: { path: string; sha256: string; id: string | null }[];
+  /**
+   * Files of tests a redesign superseded (Kane keeps them on disk and reports them as replaced;
+   * it never deletes them). Identified by the file's pin: its id is the superseded test's short
+   * id and its base is that test's definition. Shown, fingerprinted and never run; deleting one
+   * needs an explicit, recorded cleanup decision (not part of B5).
+   */
+  supersededTestFiles?: { path: string; sha256: string; id: string; testCid: string; supersededInSeq: number; successor: string | null }[];
   /** Kane's generated variables file, read only; KaneVerity never writes it. */
   variables: {
     path: string;
@@ -404,6 +418,13 @@ function outcomeSpecs(s: DesignSnapshot, r: Requirements, mapping: OutcomeMappin
       p.push(m.problem ?? `${o.item} has no criterion.`);
       return spec;
     }
+    // An outcome with no exact value (O2) is a change from the starting state: its criterion must
+    // say so (Kane's kind delta or state-transition), not just that something exists.
+    if (!o.labels.length) {
+      const ac = s.acs.find((a) => a.cid === m.acCid);
+      if (!ac?.kind) p.push(`Criterion ${m.acSlug} records no kind, so it cannot be shown to require a change from the starting state.`);
+      else if (!CHANGE_KINDS.includes(ac.kind)) p.push(`Criterion ${m.acSlug} is a ${ac.kind} criterion, but ${o.item} is a change from the starting state (every earlier key kept, a new one added): it must be a delta or state-transition criterion. A redesign from the acs phase can replace it (Kane supersedes a criterion re-sent with the same text and changed content).`);
+    }
     const sc = s.scenarios.filter((x) => x.exercises.includes(m.acCid!));
     const own = sc.filter((x) => x.exercises.length === 1);
     if (own.length !== 1) {
@@ -428,9 +449,12 @@ function outcomeSpecs(s: DesignSnapshot, r: Requirements, mapping: OutcomeMappin
         const kindOk = (c.kind === 'presence' && c.operator === 'exists') || (c.kind === 'absolute' && (c.operator === 'equals' || c.operator === 'contains'));
         if (!kindOk) p.push(`Test ${t.slug}'s check (${c.kind} ${c.operator ?? ''}) cannot check an exact value; ${o.item} needs presence/exists or absolute equals/contains.`);
         for (const l of o.labels) if (!(c.operand ?? '').includes(l)) p.push(`Test ${t.slug}'s check does not name the exact value '${l}'.`);
-      } else if (!['delta', 'state-transition', 'count'].includes(c.kind)) {
-        p.push(`${o.item} has no exact documented value, so it must be checked as a change against a captured starting state (delta, state-transition or count); test ${t.slug} uses ${c.kind}.`);
+      } else if (!CHANGE_KINDS.includes(c.kind)) {
+        p.push(`${o.item} has no exact documented value, so it must be checked as a change against a captured starting state (delta or state-transition); test ${t.slug} uses ${c.kind}.`);
       }
+      // The check must say what its criterion says: no contradictory criterion and test.
+      const ac = s.acs.find((a) => a.cid === m.acCid);
+      if (ac?.kind && c.kind !== ac.kind) p.push(`Test ${t.slug}'s check is ${c.kind}, but its criterion ${m.acSlug} is ${ac.kind}: the criterion and the test contradict each other.`);
     }
     // The step that asserts it: tagged with this criterion only, asserting, with the exact values.
     const tagged = t.steps.filter((st) => st.tags.length > 0);
@@ -505,7 +529,8 @@ function filesCheck(s: DesignSnapshot): Check {
     }
   }
   for (const f of s.strayTestFiles) problems.push(`${f.path} belongs to no live test of this use case (${f.id ?? 'no id'}); a run could pick it up.`);
-  return { ok: problems.length === 0, problems, notes: [] };
+  const notes = (s.supersededTestFiles ?? []).map((f) => `${f.path} is the file of ${f.id}, superseded in record #${f.supersededInSeq}${f.successor ? ` by ${f.successor}` : ''}. Kane keeps it on disk; it is never run, and it is fingerprinted so any change blocks a run. Deleting it needs an explicit, recorded cleanup decision.`);
+  return { ok: problems.length === 0, problems, notes };
 }
 
 export function evaluateDesign(s: DesignSnapshot, r: Requirements): DesignEvaluation {

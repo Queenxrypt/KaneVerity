@@ -273,7 +273,17 @@ export async function assembleDesign(input: {
     return { cid, slug: g.slugOf.get(cid) ?? null, trust: row?.trust ?? null, fresh: row?.fresh ?? null, mintedSeq: n.seq, mintedHash: recordOf(n.seq)?.hash ?? null, generation: generationOf(n.seq), contentSha256: sha256(canonical(n.content)) };
   };
 
-  const acs: AcItem[] = liveAcs.map((cid) => ({ ...base(cid), label: 'ac' as const, text: str(g.nodes.get(cid)!.content.text) ?? '' }));
+  const acs: AcItem[] = liveAcs.map((cid) => {
+    const c = g.nodes.get(cid)!.content;
+    const ea = c.expected_answer && typeof c.expected_answer === 'object' && !Array.isArray(c.expected_answer) ? (c.expected_answer as Record<string, unknown>) : null;
+    return {
+      ...base(cid),
+      label: 'ac' as const,
+      text: str(c.text) ?? '',
+      kind: str(c.kind),
+      expectedAnswer: ea ? { kind: str(ea.kind), operator: str(ea.operator), operand: typeof ea.operand === 'string' ? ea.operand : ea.operand === undefined ? null : JSON.stringify(ea.operand), baseline: ea.baseline ?? null } : null,
+    };
+  });
   const scenarios: ScenarioItem[] = liveScenarios.map((cid) => {
     const c = g.nodes.get(cid)!.content;
     return { ...base(cid), label: 'scenario' as const, title: str(c.title) ?? '', intent: str(c.intent) ?? '', caseType: str(c.case_type), exercises: liveOut(cid, 'exercises').sort(), belongsTo: liveOut(cid, 'belongs_to') };
@@ -313,6 +323,17 @@ export async function assembleDesign(input: {
       file: f ? { path: f.path, sha256: f.sha256, bodyMatches: f.body === blob, basePin: f.base, id: f.id } : null,
     };
   });
+  // A file Kane kept for a test that a redesign of THIS use case superseded: its pin names that
+  // superseded test exactly (short id and definition). Anything else unclaimed is stray.
+  const supersededTests = [...g.nodes.values()].filter((n) => n.label === 'test' && g.supersededNodes.has(n.cid) && g.edges.some((e) => e.src === n.cid && e.type === 'automates' && scenarioCids.has(e.dst)));
+  const supersededTestFiles: NonNullable<DesignSnapshot['supersededTestFiles']> = [];
+  for (const f of files.filter((x) => !claimed.has(x.path))) {
+    const hits = supersededTests.filter((n) => !!f.id && g.slugOf.get(n.cid) === f.id && !!f.base && str(n.content.definitionId) === f.base);
+    if (hits.length !== 1) continue;
+    const sup = g.supersededNodes.get(hits[0].cid)!;
+    supersededTestFiles.push({ path: f.path, sha256: f.sha256, id: f.id!, testCid: hits[0].cid, supersededInSeq: sup.seq, successor: sup.next ? (g.slugOf.get(sup.next) ?? sup.next) : null });
+    claimed.add(f.path);
+  }
   const strayTestFiles = files.filter((f) => !claimed.has(f.path)).map((f) => ({ path: f.path, sha256: f.sha256, id: f.id }));
   for (const t of tests) t.recording = t.file ? await recordingTree(workspaceDir, t.file.path) : null;
 
@@ -411,6 +432,7 @@ export async function assembleDesign(input: {
     tests,
     gaps,
     strayTestFiles,
+    supersededTestFiles,
     variables: { path: varsRel, sha256: varsBuf ? createHash('sha256').update(varsBuf).digest('hex') : null, appUrlDeclared, appUrlHasValue, files: varFiles, runFile, appUrlWinner: effectiveLocalAppUrl(localTexts) },
     kaneReviews: (ucSnap.kaneReviews ?? [])
       .filter((k) => included.some((x) => x.cid === k.ucCid))
@@ -569,7 +591,7 @@ export interface ExecutionEntry {
   reviewer: string;
   readinessSha256: string;
   targets: ExecutionTarget[];
-  pre: { testFiles: { path: string; sha256: string }[]; variables: { name: string; sha256: string }[]; recordings: { path: string; sha256: string | null; exists: boolean; staging: boolean }[]; storeRecords: number; storeTip: string | null; evidenceFiles: string[]; designSnapshot: number };
+  pre: { testFiles: { path: string; sha256: string }[]; /** Superseded tests' files kept on disk (never run), as checked before the run. */ supersededFiles?: { path: string; sha256: string }[]; variables: { name: string; sha256: string }[]; recordings: { path: string; sha256: string | null; exists: boolean; staging: boolean }[]; storeRecords: number; storeTip: string | null; evidenceFiles: string[]; designSnapshot: number };
   result: ExecutionResult | null;
   by: 'kaneverity-design-review';
 }
@@ -680,6 +702,8 @@ export function dryRunBinding(s: DesignSnapshot): Record<string, unknown> {
   return {
     tests: s.tests.map((t) => ({ cid: t.cid, definitionId: t.definitionId, path: t.file?.path ?? null, sha256: t.file?.sha256 ?? null, recording: t.recording?.sha256 ?? null })).sort((a, b) => String(a.path).localeCompare(String(b.path))),
     variables: s.variables.files ?? [],
+    // Superseded tests' kept files: never run, but a change to one needs a new dry run (and so blocks the run).
+    ...(s.supersededTestFiles?.length ? { supersededFiles: s.supersededTestFiles.map((f) => ({ path: f.path, sha256: f.sha256 })).sort((a, b) => a.path.localeCompare(b.path)) } : {}),
   };
 }
 
@@ -1008,6 +1032,7 @@ export class AssuranceDesigns {
         tests: snap.tests,
         gaps: snap.gaps,
         strayTestFiles: snap.strayTestFiles,
+        supersededTestFiles: snap.supersededTestFiles ?? [],
         variables: snap.variables,
       },
       documented: requirements,
@@ -1318,13 +1343,17 @@ export class AssuranceDesigns {
   }
 
   /** Fingerprints of what a run depends on, from disk (no Kane). */
-  private async diskFingerprints(files: string[]) {
+  private async diskFingerprints(files: string[], kept: string[] = []) {
     const ws = config.assurance.workspaceDir;
-    const testFiles: { path: string; sha256: string }[] = [];
-    for (const f of files) {
+    const hashOf = async (f: string) => {
       const b = await readFile(path.join(ws, ...f.split('/'))).catch(() => null);
-      testFiles.push({ path: f, sha256: b ? createHash('sha256').update(b).digest('hex') : 'missing' });
-    }
+      return { path: f, sha256: b ? createHash('sha256').update(b).digest('hex') : 'missing' };
+    };
+    const testFiles: { path: string; sha256: string }[] = [];
+    for (const f of files) testFiles.push(await hashOf(f));
+    // Superseded tests' files Kane kept (never run): fingerprinted so a change is seen.
+    const supersededFiles: { path: string; sha256: string }[] = [];
+    for (const f of kept) supersededFiles.push(await hashOf(f));
     const varDir = path.join(ws, '.testmuai', 'variables');
     const variables: { name: string; sha256: string }[] = [];
     for (const name of (await readdir(varDir).catch(() => [] as string[])).filter((n) => n.endsWith('.json')).sort()) {
@@ -1336,7 +1365,7 @@ export class AssuranceDesigns {
       const r = await recordingTree(ws, p);
       return { path: r.dir, sha256: r.sha256, exists: r.exists, staging: r.staging };
     }));
-    return { testFiles, variables, allTests, recordings };
+    return { testFiles, supersededFiles, variables, allTests, recordings };
   }
 
   private async evidenceFiles(): Promise<string[]> {
@@ -1373,8 +1402,10 @@ export class AssuranceDesigns {
         return { outcome: o.outcome, outcomeText: o.outcomeText, labels: req.labels, acCid: o.acCid!, acSlug: o.acSlug!, testCid: tst.cid, testSlug: tst.slug ?? '', definitionId: tst.definitionId ?? '', requirement: requirementFor(o.outcomeText, req.labels) };
       });
       const files = snap.tests.map((x) => x.file!.path).sort();
-      const disk = await this.diskFingerprints(files);
-      const pre: ExecutionEntry['pre'] = { testFiles: disk.testFiles, variables: disk.variables, recordings: disk.recordings, storeRecords: snap.store.records, storeTip: snap.store.tipHash, evidenceFiles: await this.evidenceFiles(), designSnapshot: snap.snapshot };
+      const kept = (snap.supersededTestFiles ?? []).map((f) => f.path).sort();
+      const disk = await this.diskFingerprints(files, kept);
+      for (const f of snap.supersededTestFiles ?? []) if (disk.supersededFiles.find((d) => d.path === f.path)?.sha256 !== f.sha256) throw new AssuranceError(409, `Not started: the superseded test file ${f.path} changed since the checks. Read the design again.`);
+      const pre: ExecutionEntry['pre'] = { testFiles: disk.testFiles, supersededFiles: disk.supersededFiles, variables: disk.variables, recordings: disk.recordings, storeRecords: snap.store.records, storeTip: snap.store.tipHash, evidenceFiles: await this.evidenceFiles(), designSnapshot: snap.snapshot };
       // A verification run replays exactly the approved recordings, unchanged since the design read.
       if (phase === 'verification') for (const rec of disk.recordings) if (!rec.exists || rec.staging || !snap.tests.some((x) => x.recording?.dir === rec.path && x.recording.sha256 === rec.sha256)) throw new AssuranceError(409, `Not started: the recording ${rec.path} is missing or changed since the checks.`);
       const readinessSha256 = sha256(canonical({ phase, pre: { ...pre, evidenceFiles: undefined }, targets, decisions: r.statuses.map((s) => s.status.entryId), writes: r.kaneApprovals.map((k) => k.write?.writeId ?? null), dryRun: r.dryRun.latest?.id ?? null }));
@@ -1408,10 +1439,11 @@ export class AssuranceDesigns {
     const x = currentExecutions(l.executions).find((e) => e.readinessSha256 === p.readinessSha256 && e.state === 'started');
     if (!x) return 'there is no started test run bound to this job.';
     if (this.writing.has(j.tutorialId) || currentDesignWrites(l.kaneWrites).some((w) => w.state === 'pending' || w.state === 'unknown')) return 'an approval write to Kane is in progress or has an unknown outcome.';
-    const disk = await this.diskFingerprints(x.pre.testFiles.map((f) => f.path));
+    const disk = await this.diskFingerprints(x.pre.testFiles.map((f) => f.path), (x.pre.supersededFiles ?? []).map((f) => f.path));
     if (canonical(disk.testFiles) !== canonical(x.pre.testFiles)) return 'a test file changed since the checks.';
+    if (canonical(disk.supersededFiles) !== canonical(x.pre.supersededFiles ?? [])) return 'a superseded test file changed since the checks.';
     if (canonical(disk.variables) !== canonical(x.pre.variables)) return 'a variables file changed since the checks.';
-    if (canonical(disk.allTests) !== canonical(x.pre.testFiles.map((f) => f.path).sort())) return 'the set of test files in the workspace changed (a run could select a file that was not checked).';
+    if (canonical(disk.allTests) !== canonical([...x.pre.testFiles.map((f) => f.path), ...(x.pre.supersededFiles ?? []).map((f) => f.path)].sort())) return 'the set of test files in the workspace changed (a run could select a file that was not checked).';
     if (canonical(disk.recordings) !== canonical(x.pre.recordings)) return 'a recording changed since the checks.';
     return null;
   }
@@ -1455,9 +1487,10 @@ export class AssuranceDesigns {
     const mutation: string[] = [];
     const problems: string[] = [];
     const ws = config.assurance.workspaceDir;
-    const disk = await this.diskFingerprints(x.pre.testFiles.map((f) => f.path));
+    const disk = await this.diskFingerprints(x.pre.testFiles.map((f) => f.path), (x.pre.supersededFiles ?? []).map((f) => f.path));
     for (const f of x.pre.testFiles) if (disk.testFiles.find((d) => d.path === f.path)?.sha256 !== f.sha256) mutation.push(`${f.path} changed during the run.`);
-    if (canonical(disk.allTests) !== canonical(x.pre.testFiles.map((f) => f.path).sort())) mutation.push('Test files were added or removed during the run.');
+    for (const f of x.pre.supersededFiles ?? []) if (disk.supersededFiles.find((d) => d.path === f.path)?.sha256 !== f.sha256) mutation.push(`The superseded test file ${f.path} changed during the run.`);
+    if (canonical(disk.allTests) !== canonical([...x.pre.testFiles.map((f) => f.path), ...(x.pre.supersededFiles ?? []).map((f) => f.path)].sort())) mutation.push('Test files were added or removed during the run.');
     if (canonical(disk.variables) !== canonical(x.pre.variables)) mutation.push('A variables file changed during the run.');
     // A verification run is a pure replay: the approved recordings must be exactly as before.
     if (x.phase === 'verification') for (const rec of x.pre.recordings) {

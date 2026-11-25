@@ -47,9 +47,9 @@ function snapshot(alter: (s: DesignSnapshot) => void = () => {}): DesignSnapshot
       { seq: 10, hash: 'h10', verb: 'design', phase: 'tests', generation: 2, completeness: 'complete', startsGeneration: null, supersedesGeneration: null },
     ],
     acs: [
-      { ...base(c(1), 'ac-1'), label: 'ac', text: 'After generating the key, the new key appears in the API keys list.' },
-      { ...base(c(2), 'ac-2'), label: 'ac', text: "After generating the key, the key count below the list shows '2 keys'." },
-      { ...base(c(3), 'ac-3'), label: 'ac', text: "After generating the key, the message 'API key generated successfully.' appears." },
+      { ...base(c(1), 'ac-1'), label: 'ac', text: 'After generating the key, the new key appears in the API keys list.', kind: 'delta' },
+      { ...base(c(2), 'ac-2'), label: 'ac', text: "After generating the key, the key count below the list shows '2 keys'.", kind: 'absolute' },
+      { ...base(c(3), 'ac-3'), label: 'ac', text: "After generating the key, the message 'API key generated successfully.' appears.", kind: 'presence' },
     ],
     scenarios: [
       { ...base(c(11), 'sc-2', 2, 8), label: 'scenario', title: 'msg', intent: '', caseType: 'happy', exercises: [c(3)], belongsTo: [c(99)] },
@@ -116,6 +116,43 @@ test('outcomes: prose without a tag, a tag for several criteria, a check aimed e
   assert.match(o.O2, /captures no baseline/);
   assert.match(o.O3, /does not name the exact value '2 keys'/);
   assert.ok(ev.outcomes.every((x) => !x.specified));
+});
+
+test('O2 needs a before/after criterion, and every check must say what its criterion says', () => {
+  const o2 = (alter: (s: DesignSnapshot) => void) => evaluateDesign(snapshot(alter), REQ).outcomes.find((x) => x.outcome === 'O2')!;
+  // The real store's ac-1 (presence) cannot stand for "every earlier key kept, a new one added".
+  let o = o2((x) => (x.acs[0].kind = 'presence'));
+  assert.equal(o.specified, false);
+  assert.match(o.problems.join(' '), /ac-1 is a presence criterion, but O2 is a change from the starting state/);
+  assert.match(o.problems.join(' '), /the criterion and the test contradict each other/, 'its delta test contradicts it too');
+  // A criterion with no recorded kind cannot be shown to require a change.
+  o = o2((x) => (x.acs[0].kind = null));
+  assert.match(o.problems.join(' '), /records no kind/);
+  // A count check is no longer enough for O2: it cannot show that every earlier key is still listed.
+  o = o2((x) => {
+    x.acs[0].kind = 'count';
+    x.tests[1].check = { ...x.tests[1].check!, kind: 'count' };
+  });
+  assert.match(o.problems.join(' '), /it must be a delta or state-transition criterion/);
+  assert.match(o.problems.join(' '), /checked as a change against a captured starting state \(delta or state-transition\); test t-3 uses count/);
+  // state-transition is accepted for both, when they agree.
+  o = o2((x) => {
+    x.acs[0].kind = 'state-transition';
+    x.tests[1].check = { ...x.tests[1].check!, kind: 'state-transition' };
+  });
+  assert.equal(o.specified, true, o.problems.join(' '));
+  // An exact-value outcome whose check disagrees with its criterion is refused too.
+  const ev = evaluateDesign(snapshot((x) => (x.tests[2].check = { kind: 'presence', operator: 'exists', operand: '2 keys', verifiedAgainst: 'ac-2', baseline: null })), REQ);
+  assert.match(ev.outcomes.find((x) => x.outcome === 'O3')!.problems.join(' '), /check is presence, but its criterion ac-2 is absolute/);
+});
+
+test('files: a superseded test file Kane kept is noted, never stray; any other unclaimed file blocks', () => {
+  let ev = evaluateDesign(snapshot((x) => (x.supersededTestFiles = [{ path: '.testmuai/tests/old_test.md', sha256: 'a'.repeat(64), id: 't-1', testCid: c(31), supersededInSeq: 10, successor: null }])), REQ);
+  assert.equal(ev.files.ok, true, ev.files.problems.join(' '));
+  assert.match(ev.files.notes.join(' '), /old_test\.md is the file of t-1, superseded in record #10.*never run.*explicit, recorded cleanup decision/);
+  ev = evaluateDesign(snapshot((x) => (x.strayTestFiles = [{ path: '.testmuai/tests/other_test.md', sha256: 'b'.repeat(64), id: 't-9' }])), REQ);
+  assert.equal(ev.files.ok, false);
+  assert.match(ev.files.problems.join(' '), /other_test\.md belongs to no live test/);
 });
 
 test('structure and mapping: one scenario for all outcomes, an extra criterion, an ambiguous match', () => {

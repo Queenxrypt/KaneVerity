@@ -190,7 +190,7 @@ test('current one-scenario design: read with free reads only, blocked on three s
   assert.ok(vars.equals(await readFile(path.join(workspace, '.testmuai', 'variables', 'assurance.json'))));
 });
 
-test('three-scenario redesign: every outcome specified, stale gap kept and acknowledged explicitly, old test file flagged', async () => {
+test('three-scenario redesign from the acs phase: ac-1 replaced by its delta successor, every outcome specified, stale gap kept, old test file kept as superseded', async () => {
   const g1 = await setup();
   await addGeneration2(g1);
   let d = await readDesign();
@@ -198,11 +198,17 @@ test('three-scenario redesign: every outcome specified, stale gap kept and ackno
   assert.equal(d.evaluation.structure.ok, true, d.evaluation.structure.problems.join(' '));
   assert.equal(d.evaluation.generation.ok, true, d.evaluation.generation.problems.join(' '));
   assert.equal(d.evaluation.generation.latest, 2);
-  assert.match(d.evaluation.generation.notes.join(' '), /criteria phase is recorded only in generation 1/);
+  // Kane superseded ac-1 (presence) with ac-4 (delta, same text): one live criterion per outcome, no duplicate.
+  assert.deepEqual(d.design.acs.map((a: { slug: string; kind: string }) => `${a.slug}:${a.kind}`).sort(), ['ac-2:absolute', 'ac-3:presence', 'ac-4:delta']);
+  assert.deepEqual(d.evaluation.mapping.entries.map((m: { outcome: string; acSlug: string }) => `${m.outcome}=${m.acSlug}`), ['O1=ac-3', 'O2=ac-4', 'O3=ac-2']);
+  assert.match(d.evaluation.generation.notes.join(' '), /Criterion ac-2 comes from generation 1 and was kept by generation 2/);
   assert.deepEqual(d.evaluation.outcomes.map((o: { outcome: string; specified: boolean; problems: string[] }) => `${o.outcome}:${o.specified}:${o.problems.join('|')}`), ['O1:true:', 'O2:true:', 'O3:true:']);
-  // The superseded t-1's file is still on disk: a run could select it.
-  assert.equal(d.evaluation.files.ok, false);
-  assert.match(d.evaluation.files.problems.join(' '), /belongs to no live test/);
+  // The superseded t-1's file is still on disk (Kane never deletes it): recognised by its pin,
+  // kept, never run and fingerprinted, never stray. Nothing was deleted.
+  assert.equal(d.evaluation.files.ok, true, d.evaluation.files.problems.join(' '));
+  assert.deepEqual(d.design.strayTestFiles, []);
+  assert.deepEqual(d.design.supersededTestFiles.map((f: { path: string; id: string; successor: string | null }) => [f.path, f.id, f.successor]), [['.testmuai/tests/generate-an-api-key-and-check-the-documented-outcomes_test.md', 't-1', null]]);
+  assert.match(d.evaluation.files.notes.join(' '), /file of t-1, superseded in record #\d+.*never run/);
   // gap-1 still points at sc-1, which the redesign superseded: kept, flagged.
   assert.equal(d.design.gaps.length, 1);
   assert.equal(d.design.gaps[0].refState, 'superseded');
@@ -247,6 +253,42 @@ test('three-scenario redesign: every outcome specified, stale gap kept and ackno
   assert.equal(d.readiness.items.find((x: { id: string }) => x.id === 'fresh').ok, true);
 });
 
+test('a redesign from the scenarios phase keeps ac-1 as presence: O2 is refused, not silently accepted', async () => {
+  const g1 = await setup();
+  await addGeneration2(g1, { from: 'scenarios' });
+  const d = await readDesign();
+  assert.equal(d.design.integrity.ok, true, d.design.integrity.problems.join(' '));
+  assert.deepEqual(d.design.acs.map((a: { slug: string; kind: string }) => `${a.slug}:${a.kind}`).sort(), ['ac-1:presence', 'ac-2:absolute', 'ac-3:presence']);
+  const o2 = d.evaluation.outcomes.find((o: { outcome: string }) => o.outcome === 'O2');
+  assert.equal(o2.specified, false);
+  assert.match(o2.problems.join(' '), /ac-1 is a presence criterion, but O2 is a change from the starting state/);
+  assert.match(o2.problems.join(' '), /contradict each other/);
+  assert.equal(d.readiness.ready, false);
+});
+
+test('a criterion re-sent with different text leaves two live criteria for O2: blocked as a duplicate, never silently kept', async () => {
+  const g1 = await setup();
+  await addGeneration2(g1, { acText: 'After generating the key, every earlier key is still in the API keys list and one new key is added.' });
+  const d = await readDesign();
+  assert.equal(d.design.integrity.ok, true, d.design.integrity.problems.join(' '));
+  // Kane superseded nothing (no text match): ac-1 is still live next to the new criterion.
+  assert.deepEqual(d.design.acs.map((a: { slug: string }) => a.slug).sort(), ['ac-1', 'ac-2', 'ac-3', 'ac-4']);
+  assert.equal(d.evaluation.structure.ok, false);
+  assert.match(d.evaluation.structure.problems.join(' '), /Found 4 live criteria; 3 documented outcomes need exactly 3/);
+  assert.equal(d.evaluation.mapping.ok, false);
+  assert.equal(d.readiness.ready, false);
+});
+
+test('a file pinned like a superseded test but to another definition is stray, not superseded', async () => {
+  const g1 = await setup();
+  await addGeneration2(g1);
+  await writeTestFile(workspace, 'copy-of-old', 't-1', 'sha256:' + '9'.repeat(64), 'tampered body');
+  const d = await readDesign();
+  assert.deepEqual(d.design.strayTestFiles.map((f: { path: string }) => f.path), ['.testmuai/tests/copy-of-old_test.md']);
+  assert.equal(d.design.supersededTestFiles.length, 1);
+  assert.equal(d.evaluation.files.ok, false);
+});
+
 test('approvals bind to fingerprints: a changed test file or content id makes them stale and unusable', async () => {
   const g1 = await setup();
   const g2 = await addGeneration2(g1);
@@ -263,7 +305,7 @@ test('approvals bind to fingerprints: a changed test file or content id makes th
   d = await j(r);
   assert.equal(d.reviews.find((x: { kind: string; target: string }) => x.kind === 'mapping' && x.target === 'O1').state, 'approved');
   assert.equal(d.reviews.find((x: { kind: string; target: string }) => x.kind === 'mapping' && x.target === 'O2').state, 'rejected');
-  assert.match(d.readiness.items.find((x: { id: string }) => x.id === 'mapping').reason, /Mapping O2 → ac-1: rejected/);
+  assert.match(d.readiness.items.find((x: { id: string }) => x.id === 'mapping').reason, /Mapping O2 → ac-4: rejected/);
   assert.equal(d.reviews.find((x: { target: string }) => x.target === g2.t2).stale, false);
   // The test file is edited on disk (as a heal or a hand edit would).
   const f = path.join(tests(), 'check-the-success-message_test.md');

@@ -29,7 +29,7 @@ import { dataPath, readJson, writeJson } from '../store.ts';
 import { findLeaks, scrub, scrubDeep } from '../verify/redact.ts';
 import { checkCitations, type CitationReport } from './citations.ts';
 import type { LineMapEntry } from './requirements.ts';
-import { kaneUserFor, sourceIdFor } from './commands.ts';
+import { isRedesignPhase, redesignAcknowledgement, type RedesignPhase, kaneUserFor, sourceIdFor } from './commands.ts';
 import { JOB_ID_PATTERN, jobStdoutPath, type AssuranceJobs, type JobRecord } from './jobs.ts';
 import {
   blockingWrite,
@@ -688,15 +688,15 @@ export class AssuranceUseCases {
    *   session): unknown or partial, so a new attempt needs an explicit acknowledgement of
    *   that job id. Nothing is ever retried automatically.
    */
-  private async previousDesign(tutorialId: string, ucCid: string): Promise<{ block: string | null; needsAck: string | null }> {
+  private async previousDesign(tutorialId: string, ucCid: string): Promise<{ block: string | null; needsAck: string | null; complete: string | null; needsAckState?: string; refused?: { jobId: string; beforeStart: boolean } }> {
     const latest = (await this.designJobs(tutorialId, ucCid))[0];
-    if (!latest) return { block: null, needsAck: null };
+    if (!latest) return { block: null, needsAck: null, complete: null };
     const expired = latest.state === 'paused' && !!latest.pause?.expiresAt && Date.parse(latest.pause.expiresAt) < Date.now();
-    if (latest.state === 'queued' || latest.state === 'running') return { block: `A test design for this use case is already ${latest.state} (job ${latest.jobId}).`, needsAck: null };
-    if (latest.state === 'paused' && !expired) return { block: `A test design for this use case is paused with Kane's questions (job ${latest.jobId}). Answer it or abandon it first.`, needsAck: null };
-    if (latest.state === 'complete') return { block: `This use case already has a test design (job ${latest.jobId}). Designing it again is not supported: it would need --force, which KaneVerity never passes.`, needsAck: null };
-    if (latest.state === 'refused') return { block: null, needsAck: null };
-    return { block: null, needsAck: latest.jobId };
+    if (latest.state === 'queued' || latest.state === 'running') return { block: `A test design for this use case is already ${latest.state} (job ${latest.jobId}).`, needsAck: null, complete: null };
+    if (latest.state === 'paused' && !expired) return { block: `A test design for this use case is paused with Kane's questions (job ${latest.jobId}). Answer it or abandon it first.`, needsAck: null, complete: null };
+    if (latest.state === 'complete') return { block: `This use case already has a test design (job ${latest.jobId}). Designing it again needs an acknowledged forced redesign ({"redesign": {"phase": "acs" | "scenarios", "acknowledgement": "<exact text>"}}).`, needsAck: null, complete: latest.jobId };;
+    if (latest.state === 'refused') return { block: null, needsAck: null, complete: null, refused: { jobId: latest.jobId, beforeStart: latest.exitCode === null } };
+    return { block: null, needsAck: latest.jobId, complete: null, needsAckState: expired ? 'paused and expired' : latest.state };
   }
 
   /** Fresh read, then every design condition for the exact content id. Returns what the job binds to. */
@@ -723,7 +723,16 @@ export class AssuranceUseCases {
     if (!isTutorialId(tutorialId)) throw new AssuranceError(404, 'Tutorial not found.');
     if (typeof ucHex !== 'string' || !UC_HEX.test(ucHex)) throw new AssuranceError(404, 'Use case not found.');
     const cid = `sha256:${ucHex}`;
-    const b = (body && typeof body === 'object' ? body : {}) as { confirm?: unknown; max?: unknown; acknowledgePrevious?: unknown };
+    const b = (body && typeof body === 'object' ? body : {}) as { confirm?: unknown; max?: unknown; acknowledgePrevious?: unknown; redesign?: unknown };
+    // B5: an acknowledged forced redesign (the one recorded exception to "never --force").
+    let redesign: { phase: RedesignPhase; acknowledgement: string } | null = null;
+    if (b.redesign !== undefined) {
+      const r = (b.redesign && typeof b.redesign === 'object' ? b.redesign : {}) as { phase?: unknown; acknowledgement?: unknown };
+      if (!isRedesignPhase(r.phase)) throw new AssuranceError(400, 'redesign.phase must be "acs" or "scenarios".');
+      const words = redesignAcknowledgement(cid, r.phase);
+      if (r.acknowledgement !== words) throw new AssuranceError(400, `A forced redesign needs this exact acknowledgement in redesign.acknowledgement: "${words}"`);
+      redesign = { phase: r.phase, acknowledgement: words };
+    }
     this.refuseWhileWriting(tutorialId);
     return this.serial(`review:${tutorialId}`, async () => {
       const reviewer = reviewerSetting();
@@ -738,7 +747,27 @@ export class AssuranceUseCases {
       if (blocking) throw new AssuranceError(409, this.lockedMessage(blocking));
       await this.refuseWhileExternal(tutorialId);
       const prev = await this.previousDesign(tutorialId, cid);
-      if (prev.block) throw new AssuranceError(409, prev.block);
+      // A forced redesign replaces a complete design; anything else in progress still blocks it.
+      if (redesign && !prev.complete) {
+        if (prev.block) throw new AssuranceError(409, prev.block);
+        if (prev.needsAck)
+          throw new AssuranceError(
+            409,
+            `Not started: the previous design attempt for this use case (job ${prev.needsAck}, ${prev.needsAckState}) ended with an incomplete or unknown outcome, so Kane may hold part of a design. A forced redesign is not started on top of it: recovering needs a separate, recorded decision (docs/ASSURANCE_PLAN.md section 13.7). Nothing was started and no credits were used.`,
+          );
+        if (prev.refused?.beforeStart)
+          throw new AssuranceError(
+            409,
+            `Not started: the previous design request for this use case (job ${prev.refused.jobId}) was refused before Kane started, so Kane's design did not run, no credits were used, and the existing complete design is intact. A forced redesign starts only when the latest design attempt is complete; going ahead after a refused request needs a separate, recorded decision. Nothing was started.`,
+          );
+        if (prev.refused)
+          throw new AssuranceError(
+            409,
+            `Not started: the previous design attempt for this use case (job ${prev.refused.jobId}, refused by Kane after it started) ended with an incomplete or unknown outcome, so Kane may hold part of a design. A forced redesign is not started on top of it: recovering needs a separate, recorded decision (docs/ASSURANCE_PLAN.md section 13.7). Nothing was started and no credits were used.`,
+          );
+        throw new AssuranceError(409, 'Not started: a forced redesign needs a complete test design of this use case to replace, and there is none.');
+      }
+      if (prev.block && !(redesign && prev.complete)) throw new AssuranceError(409, prev.block);
       if (prev.needsAck && b.acknowledgePrevious !== prev.needsAck) {
         throw new AssuranceError(409, `The previous design attempt for this use case (job ${prev.needsAck}) ended without a known result. Kane may hold part of a design. Check it, then start again with {"acknowledgePrevious": "${prev.needsAck}"}; it is never retried automatically.`);
       }
@@ -751,6 +780,7 @@ export class AssuranceUseCases {
         reviewer: reviewer.label,
         decisionId,
         acknowledgedPrevious: prev.needsAck,
+        redesign,
         requirements: fresh.requirements,
         confirm: b.confirm,
       });

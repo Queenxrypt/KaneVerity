@@ -219,6 +219,8 @@ if (argv[0] === 'testrun' && argv[1] === 'run') {
   // A run that takes a while (to watch a UI refresh while Kane "runs").
   if (cfg.delayMs) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(Number(cfg.delayMs), 20000));
   if (cfg.mutateTest) fs.appendFileSync(path.join(cwd, files[0]), '\n## Step 9\n\nhealed step\n');
+  // Any other workspace file the run changes (e.g. a superseded test's kept file).
+  if (cfg.touchFile) fs.appendFileSync(path.join(cwd, cfg.touchFile), '\ntouched during the run\n');
   // Recordings, as 0.10.5 keeps them next to each test: output-<stem>/Result.md and
   // .internal/steps/<n>-<md5>/flows/... A test without a recording is authored (written);
   // with one it is replayed (untouched) unless cfg.reauthor rewrites it (a replay miss that

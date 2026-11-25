@@ -224,16 +224,16 @@ test('gates before authoring, then authoring (AUTHORED, never VERIFIED), recordi
 
   // Gates block until met: a refused write, an unknown write (reconciled from the store), app_url, the dry run.
   for (const o of ['O1', 'O2', 'O3']) await post(`${D}/review`, { kind: 'mapping', target: o, decision: 'approve' });
-  await post(`${D}/review`, { kind: 'ac', target: g1.ac1, decision: 'approve' });
+  await post(`${D}/review`, { kind: 'ac', target: g1.ac3, decision: 'approve' });
   await script({ review: { mode: 'refuse' } });
-  assert.equal((await j(await post(`${D}/kane-write`, { target: g1.ac1 }))).kaneApprovals.find((k: { target: string }) => k.target === g1.ac1).state, 'not_written');
+  assert.equal((await j(await post(`${D}/kane-write`, { target: g1.ac3 }))).kaneApprovals.find((k: { target: string }) => k.target === g1.ac3).state, 'not_written');
   await script({ review: { mode: 'crashAfter' } });
-  d = await j(await post(`${D}/kane-write`, { target: g1.ac1 }));
-  assert.equal(d.kaneApprovals.find((k: { target: string }) => k.target === g1.ac1).state, 'unknown');
+  d = await j(await post(`${D}/kane-write`, { target: g1.ac3 }));
+  assert.equal(d.kaneApprovals.find((k: { target: string }) => k.target === g1.ac3).state, 'unknown');
   assert.match(gate(d, 'idle').reason, /unknown outcome/);
   assert.equal((await post(`${U}/${UC.slice(7)}/review`, { decision: 'approve', acknowledgeGaps: true })).status, 409, 'use-case decisions wait too');
   await script({});
-  assert.equal((await j(await post(`${D}/kane-reconcile`, { target: g1.ac1 }))).kaneApprovals.find((k: { target: string }) => k.target === g1.ac1).state, 'verified');
+  assert.equal((await j(await post(`${D}/kane-reconcile`, { target: g1.ac3 }))).kaneApprovals.find((k: { target: string }) => k.target === g1.ac3).state, 'verified');
   await post(`${D}/app-url`, { value: appOrigin, confirm: true });
   d = await j(await post(`${D}/dry-run`));
   assert.deepEqual(d.dryRun.latest.unresolved, ['app_url'], 'without the run file the dry run reports app_url unresolved');
@@ -305,6 +305,42 @@ test('gates before authoring, then authoring (AUTHORED, never VERIFIED), recordi
   assert.match(gate({ readiness: d.verificationReadiness }, 'recordings').reason, /approval is stale/);
   assert.equal((await run('verification')).status, 409, 'changed recordings block verification');
   void g2;
+});
+
+test("a superseded test's kept file is never run and never blocks, but any change to it does", async () => {
+  await setup();
+  // Kane keeps t-1's file after the redesign (it never deletes it).
+  const OLD = 'generate-an-api-key-and-check-the-documented-outcomes';
+  const g1ids = generation1(UC).ids;
+  await writeTestFile(workspace, OLD, 't-1', g1ids.definitionId1, g1ids.t1Body);
+  const oldRel = `.testmuai/tests/${OLD}_test.md`;
+  const oldAbs = path.join(workspace, '.testmuai', 'tests', `${OLD}_test.md`);
+  const original = await readFile(oldAbs);
+  let d = await toAuthoringReady();
+  assert.deepEqual(d.design.supersededTestFiles.map((f: { path: string }) => f.path), [oldRel]);
+  assert.deepEqual(d.design.strayTestFiles, []);
+  // Changed before the run: refused, and Kane never starts.
+  await writeFile(oldAbs, original.toString('utf8') + '\nedited\n');
+  const before = await testRuns();
+  let r = await run('authoring');
+  assert.equal(r.status, 409);
+  assert.match((await j(r)).error, /superseded test file|Generated test files|files/i);
+  assert.equal(await testRuns(), before);
+  await writeFile(oldAbs, original);
+  d = await readDesign();
+  // An authoring run with the kept file on disk: it is not passed to Kane, and it does not refuse the run.
+  await script({ testrun: { pack: await packFile('author-kept', undefined, 'author'), packName: 'run-k1', appendRecord: 'execution' } });
+  d = await settled('authoring');
+  assert.equal(d.execution.verdict, 'AUTHORED', JSON.stringify(d.execution));
+  const argv = (await calls()).filter((c) => c.argv[0] === 'testrun' && !c.argv.includes('--dry-run')).pop()!.argv;
+  assert.ok(!argv.includes(oldRel), 'the superseded file is never run');
+  // Changed during a run: a mutation, NOT VERIFIED (here an authoring run: not AUTHORED).
+  await approveRecordings();
+  await script({ testrun: { pack: await packFile('author-kept-2', undefined, 'author'), packName: 'run-k2', appendRecord: 'execution', touchFile: oldRel } });
+  d = await settled('authoring');
+  assert.equal(d.execution.verdict, 'NOT_VERIFIED');
+  assert.match(d.execution.mutation.join(' '), /superseded test file .* changed during the run/);
+  await writeFile(oldAbs, original);
 });
 
 test('a test file changed during an authoring run fails it, blocks the next run, and its recordings cannot be approved', async () => {

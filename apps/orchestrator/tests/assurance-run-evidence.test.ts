@@ -12,7 +12,7 @@ const defs = { message: 'sha256:' + '1'.repeat(64), list: 'sha256:' + '2'.repeat
 const c = (n: number) => 'sha256:' + String(n).padStart(64, '0');
 const TARGETS: OutcomeTarget[] = [
   { outcome: 'O1', outcomeText: "The message 'API key generated successfully.' appears.", labels: ['API key generated successfully.'], acCid: c(3), acSlug: 'ac-3', testCid: c(21), testSlug: 't-2', definitionId: defs.message },
-  { outcome: 'O2', outcomeText: 'The new key is added to the API keys list.', labels: [], acCid: c(1), acSlug: 'ac-1', testCid: c(22), testSlug: 't-3', definitionId: defs.list },
+  { outcome: 'O2', outcomeText: 'The new key is added to the API keys list.', labels: [], acCid: c(1), acSlug: 'ac-4', testCid: c(22), testSlug: 't-3', definitionId: defs.list },
   { outcome: 'O3', outcomeText: "The key count below the list shows '2 keys'.", labels: ['2 keys'], acCid: c(2), acSlug: 'ac-2', testCid: c(23), testSlug: 't-4', definitionId: defs.count },
 ];
 const pack = (alter: (m: PackMember[]) => void = () => {}, opts: { runStatus?: string; producerVersion?: string; surfaces?: string[]; runKind?: string } = {}) => {
