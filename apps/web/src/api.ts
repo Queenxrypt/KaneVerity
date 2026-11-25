@@ -1,7 +1,7 @@
 // Client for the local KaneVerity orchestrator (via the Vite /api proxy).
 // Every request carries X-KaneVerity: 1; mutating requests send JSON.
 
-import type { Discovery, FreshnessReport, Health, Project, PublicCorrection, PublicRun, RequirementsDetail, RequirementsSummary, RequirementsVersionMeta, AssuranceStatus, PublicJob, JobAnswer, UseCasesResponse } from './types.ts';
+import type { Discovery, FreshnessReport, Health, Project, PublicCorrection, PublicRun, RequirementsDetail, RequirementsSummary, RequirementsVersionMeta, AssuranceStatus, PublicJob, JobAnswer, UseCasesResponse, DesignReviewResponse } from './types.ts';
 
 export class ApiError extends Error {
   status: number;
@@ -10,6 +10,8 @@ export class ApiError extends Error {
     this.status = status;
   }
 }
+
+const designPath = (tutorialId: string, cid: string) => `/assurance/designs/${encodeURIComponent(tutorialId)}/${cid.replace(/^sha256:/, '')}`;
 
 export const ORCHESTRATOR_DOWN = 'The KaneVerity orchestrator is not reachable. Start it in a terminal with: npm run dev:orchestrator';
 
@@ -54,6 +56,19 @@ export const api = {
   startJob: (body: { kind: string; tutorialId?: string; confirm?: { paid: true } }) => request<PublicJob>('/assurance/jobs', { method: 'POST', body }),
   answerJob: (id: string, answers: Record<string, JobAnswer>) => request<PublicJob>(`/assurance/jobs/${encodeURIComponent(id)}/answer`, { method: 'POST', body: { answers, confirm: { paid: true } } }),
   cancelJob: (id: string) => request<PublicJob>(`/assurance/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: {} }),
+  // B5: test-design review (free reads, KaneVerity's own records; nothing is written to Kane).
+  designReview: (tutorialId: string, cid: string) => request<DesignReviewResponse>(designPath(tutorialId, cid)),
+  retrieveDesign: (tutorialId: string, cid: string) => request<DesignReviewResponse>(`${designPath(tutorialId, cid)}/retrieve`, { method: 'POST', body: {} }),
+  reviewDesignItem: (tutorialId: string, cid: string, body: { kind: string; target: string; decision: 'approve' | 'reject' | 'acknowledge'; reason?: string; acknowledgeStale?: boolean }) =>
+    request<DesignReviewResponse>(`${designPath(tutorialId, cid)}/review`, { method: 'POST', body }),
+  approveAppUrl: (tutorialId: string, cid: string, value: string) => request<DesignReviewResponse>(`${designPath(tutorialId, cid)}/app-url`, { method: 'POST', body: { value, confirm: true } }),
+  writeRunVariables: (tutorialId: string, cid: string) => request<DesignReviewResponse>(`${designPath(tutorialId, cid)}/run-variables`, { method: 'POST', body: { confirm: true } }),
+  kaneWriteItem: (tutorialId: string, cid: string, target: string) => request<DesignReviewResponse>(`${designPath(tutorialId, cid)}/kane-write`, { method: 'POST', body: { target } }),
+  reconcileKaneItem: (tutorialId: string, cid: string, target: string) => request<DesignReviewResponse>(`${designPath(tutorialId, cid)}/kane-reconcile`, { method: 'POST', body: { target } }),
+  dryRunDesign: (tutorialId: string, cid: string) => request<DesignReviewResponse>(`${designPath(tutorialId, cid)}/dry-run`, { method: 'POST', body: {} }),
+  executeDesign: (tutorialId: string, cid: string, phase: 'authoring' | 'verification') =>
+    request<DesignReviewResponse>(`${designPath(tutorialId, cid)}/execute`, { method: 'POST', body: { confirm: { paid: true }, phase } }),
+  reconcileExecution: (tutorialId: string, cid: string, executionId: string) => request<DesignReviewResponse>(`${designPath(tutorialId, cid)}/executions/${encodeURIComponent(executionId)}/reconcile`, { method: 'POST', body: {} }),
   // Assurance B3: use cases and KaneVerity's own review.
   useCases: (tutorialId: string) => request<UseCasesResponse>(`/assurance/usecases/${encodeURIComponent(tutorialId)}`),
   retrieveUseCases: (tutorialId: string) => request<UseCasesResponse>(`/assurance/usecases/${encodeURIComponent(tutorialId)}/retrieve`, { method: 'POST', body: {} }),

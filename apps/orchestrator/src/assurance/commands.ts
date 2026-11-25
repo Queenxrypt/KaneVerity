@@ -7,7 +7,7 @@
 
 import type { PendingQuestion } from './stream.ts';
 
-export type JobKind = 'ingest' | 'extract' | 'design' | 'resume' | 'list' | 'cover' | 'view' | 'fsck' | 'review';
+export type JobKind = 'ingest' | 'extract' | 'design' | 'resume' | 'list' | 'cover' | 'view' | 'fsck' | 'review' | 'dryrun' | 'testrun';
 
 export interface JobKindInfo {
   kind: JobKind;
@@ -37,6 +37,12 @@ export const JOB_KINDS: Record<JobKind, JobKindInfo> = {
   fsck: { kind: 'fsck', label: 'Check the store', paid: false, writesStore: false, output: 'json' },
   // B4: write one KaneVerity approval into the store (documented as free; validated in V-B4a).
   review: { kind: 'review', label: 'Record a KaneVerity approval in Kane', paid: false, writesStore: true, output: 'json', internal: true, cancellable: false },
+  // B5: plan and preflight the approved tests without running them (documented: "Plan + validate
+  // only, execute nothing"; checked on a disposable copy: no file written). Free.
+  dryrun: { kind: 'dryrun', label: 'Check the approved tests (dry run)', paid: false, writesStore: false, output: 'text', internal: true },
+  // B5: run the approved tests. Paid (browser agent). Started only from the design execution
+  // endpoint after every pre-execution gate passed; never stopped from the jobs API.
+  testrun: { kind: 'testrun', label: 'Run the approved tests', paid: true, writesStore: true, output: 'text', internal: true, cancellable: false },
 };
 
 /**
@@ -49,6 +55,15 @@ export const FORBIDDEN_FLAGS = ['--allow-unreviewed', '--allow-archive', '--forc
 /** Id of one KaneVerity approval write (its private verdict file lives under data/assurance/kane-writes/<id>/). */
 export const WRITE_ID_PATTERN = /^w[0-9]{8}-[0-9]{6}-[a-f0-9]{6}$/;
 const CONTENT_ID = /^sha256:[a-f0-9]{64}$/;
+/** A generated test file, workspace-relative, as Kane writes them (.testmuai/tests/<name>_test.md). */
+export const TEST_FILE = /^\.testmuai\/tests\/[a-z0-9][a-z0-9._-]{0,150}_test\.md$/;
+
+function testFiles(files: string[]): string[] {
+  if (!Array.isArray(files) || files.length === 0 || files.length > 20) throw new CommandError('A run needs 1 to 20 test files.');
+  for (const f of files) if (typeof f !== 'string' || !TEST_FILE.test(f) || f.includes('..')) throw new CommandError('Invalid test file path.');
+  if (new Set(files).size !== files.length) throw new CommandError('A test file is listed twice.');
+  return files;
+}
 
 export function isJobKind(v: unknown): v is JobKind {
   return typeof v === 'string' && Object.prototype.hasOwnProperty.call(JOB_KINDS, v);
@@ -90,7 +105,11 @@ export type JobParams =
   | { kind: 'cover' }
   | { kind: 'view' }
   | { kind: 'fsck' }
-  | { kind: 'review'; tutorialId: string; writeId: string; ucCid: string; reviewer: string };
+  | { kind: 'review'; tutorialId: string; writeId: string; ucCid: string; reviewer: string }
+  /** B5: the approved tests' files (workspace-relative), planned only. */
+  | { kind: 'dryrun'; tutorialId: string; files: string[] }
+  /** B5: the approved tests' files, bound to the use case and the readiness fingerprint checked before Kane starts. */
+  | { kind: 'testrun'; tutorialId: string; ucCid: string; files: string[]; reviewer: string; readinessSha256: string };
 
 /** The exact Kane CLI arguments for a job (after `node kane-cli.cjs`). */
 export function buildArgs(p: JobParams): string[] {
@@ -156,6 +175,19 @@ function argsFor(p: JobParams): string[] {
       if (!CONTENT_ID.test(p.ucCid)) throw new CommandError('Invalid use-case content id.');
       kaneUserFor(p.reviewer);
       return ['context', 'review', '--verdicts', verdictFileFor(p.writeId), '--mode', 'ci', '--json'];
+    case 'dryrun':
+      // Documented: "--dry-run  Plan + validate only, execute nothing"; --agent: NDJSON on stdout.
+      sourceIdFor(p.tutorialId);
+      return ['testrun', 'run', ...testFiles(p.files), '--dry-run', '--agent'];
+    case 'testrun':
+      // Documented flags only. --no-adaptive-heal: a replay miss is terminal instead of
+      // re-authoring (it does not stop a first run from authoring, nor local records).
+      // The hidden --local / --no-testmd-sync are not used (see ASSURANCE_PLAN section 13.8).
+      sourceIdFor(p.tutorialId);
+      if (!CONTENT_ID.test(p.ucCid)) throw new CommandError('Invalid use-case content id.');
+      kaneUserFor(p.reviewer);
+      if (!/^[a-f0-9]{64}$/.test(p.readinessSha256)) throw new CommandError('Invalid readiness fingerprint.');
+      return ['testrun', 'run', ...testFiles(p.files), '--agent', '--headless', '--no-adaptive-heal'];
   }
 }
 

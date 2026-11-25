@@ -76,6 +76,29 @@ if (script.dynamic && argv[0] === 'context' && ['fsck', 'list', 'view', 'review'
   const ucs = [...nodes.values()].filter((n) => n.label === 'usecase');
   const sources = [...nodes.values()].filter((n) => n.label === 'source');
   const out = (o) => process.stdout.write(JSON.stringify(o) + '\n');
+  // B5: test-design items, as 0.10.5 lists and views them (real store, records 4-7):
+  // list rows {id: <short id>, cid, label, title, trust, fresh}; view nodes {cid, slug,
+  // label, trust, superseded}; view edges {type, src, dst} for the design links.
+  const DESIGN = new Set(['ac', 'scenario', 'test', 'gap']);
+  const LINKS = new Set(['scoped_to', 'belongs_to', 'exercises', 'automates', 'verifies']);
+  const slugOf = new Map();
+  const superseded = new Set();
+  const retired = new Set();
+  const designEdges = [];
+  for (const r of records) {
+    for (const nm of r.names || []) slugOf.set(nm.cid, nm.slug);
+    for (const s of r.supersessions || []) {
+      if (s.kind === 'node') superseded.add(s.old);
+      if (s.kind === 'edge') retired.add(s.ecid);
+    }
+    for (const e of r.edges || []) if (LINKS.has(e.type)) designEdges.push(e);
+    for (const it of r.review || []) if (nodes.has(it.id) && DESIGN.has(nodes.get(it.id).label)) trust.set(it.id, it.resolution === 'approved' ? 'trusted' : trust.get(it.id));
+  }
+  const design = [...nodes.values()].filter((n) => DESIGN.has(n.label) && !superseded.has(n.cid));
+  for (const n of design) if (!trust.has(n.cid)) trust.set(n.cid, 'derived');
+  const live = (c) => nodes.has(c) && !superseded.has(c);
+  const liveLinks = designEdges.filter((e) => !retired.has(e.ecid) && live(e.src) && (live(e.dst) || ucs.some((u) => u.cid === e.dst)));
+  const titleOf = (n) => String(n.content.title ?? n.content.text ?? (n.content.question && n.content.question.header) ?? '');
   if (argv[1] === 'fsck') {
     out({ ok: true, issues: [], records: records.length });
     process.exit(0);
@@ -89,6 +112,7 @@ if (script.dynamic && argv[0] === 'context' && ['fsck', 'list', 'view', 'review'
       if (script.listDropLast && i === ucs.length - 1) return;
       out({ id: `uc-${i + 1}`, cid: u.cid, label: 'usecase', title: u.content.title, trust: trust.get(u.cid), fresh: 'fresh' });
     });
+    if (!inferred) for (const n of design) out({ id: slugOf.get(n.cid), cid: n.cid, label: n.label, title: titleOf(n), trust: trust.get(n.cid), fresh: 'fresh' });
     process.exit(0);
   }
   if (argv[1] === 'view') {
@@ -102,8 +126,12 @@ if (script.dynamic && argv[0] === 'context' && ['fsck', 'list', 'view', 'review'
     out({
       meta: { schema: 'assurance/context@1', tipHash: hashes[String(records.length)], storePath: 'C:\\Users\\someone\\private\\.context' },
       // Real 0.10.5 view nodes carry their label (V1, V-B4a).
-      nodes: [...ucs.map((u) => ({ cid: u.cid, label: 'usecase', trust: trust.get(u.cid) })), ...sources.map((s) => ({ cid: s.cid, label: 'source', trust: 'derived' }))],
-      edges: [...grouped.values()],
+      nodes: [
+        ...ucs.map((u) => ({ cid: u.cid, label: 'usecase', trust: trust.get(u.cid) })),
+        ...sources.map((s) => ({ cid: s.cid, label: 'source', trust: 'derived' })),
+        ...design.map((n) => ({ cid: n.cid, slug: slugOf.get(n.cid), label: n.label, trust: trust.get(n.cid), superseded: false })),
+      ],
+      edges: [...grouped.values(), ...(script.viewDropLink ? liveLinks.slice(1) : liveLinks).map((e) => ({ type: e.type, src: e.src, dst: e.dst }))],
       contentHtml: Object.fromEntries(ucs.map((u) => [u.cid, `<ul class="crit">${u.content.criteria.map((c) => `<li>${esc(c)}</li>`).join('')}</ul>`])),
     });
     process.exit(0);
@@ -156,6 +184,71 @@ if (script.dynamic && argv[0] === 'context' && ['fsck', 'list', 'view', 'review'
   else for (const v of verdicts) out({ ref: 'uc-1', cid: v.ref, resolution: v.resolution });
   process.exit(0);
 }
+// ---------------------------------------------------------------------------
+// B5: `testrun run <files...>`. With --dry-run it prints the plan as 0.10.5 does
+// (testrun_plan, and an unresolved_variables warning), computing unresolved variables
+// the way Kane's loader does: every *.json in .testmuai/variables/, alphabetically, a
+// later file winning; a variable is resolved only with a non-empty value. Without
+// --dry-run it "runs": script.testrun {mode: ok|hang, delayMs, exit, pack (file to copy into
+// .testmuai/evidence/), packName, mutateTest, appendRecord (intent verb)}.
+// ---------------------------------------------------------------------------
+if (argv[0] === 'testrun' && argv[1] === 'run') {
+  const cfg = script.testrun || {};
+  const files = argv.slice(2).filter((a) => !a.startsWith('--'));
+  const cwd = process.cwd();
+  const out = (o) => process.stdout.write(JSON.stringify(o) + '\n');
+  if (argv.includes('--dry-run')) {
+    const used = new Set();
+    for (const f of files) for (const m of fs.readFileSync(path.join(cwd, f), 'utf8').matchAll(/\{\{\s*([a-z_][a-z0-9_]*)\s*\}\}/g)) used.add(m[1]);
+    const vars = {};
+    const vdir = path.join(cwd, '.testmuai', 'variables');
+    for (const n of (fs.existsSync(vdir) ? fs.readdirSync(vdir) : []).filter((x) => x.endsWith('.json')).sort()) {
+      const o = JSON.parse(fs.readFileSync(path.join(vdir, n), 'utf8'));
+      for (const [k, v] of Object.entries(o)) if (v && typeof v === 'object' && 'value' in v) vars[k] = v;
+    }
+    const unresolved = [...used].filter((n) => !(vars[n] && String(vars[n].value).trim()));
+    out({ type: 'stream_start', cli_version: '0.10.5', surface: 'testrun', v: 1 });
+    out({ type: 'testrun_plan', members: files.map((f) => ({ path: path.join(cwd, f), tags: [], ...(unresolved.length ? { unresolved: unresolved.map((n) => ({ name: n, reason: 'value_missing' })) } : {}) })) });
+    if (unresolved.length) out({ type: 'warning', code: 'unresolved_variables', message: `${unresolved.length} variable(s) have no value`, variables: unresolved.map((n) => ({ name: n, reason: 'value_missing' })), v: 1 });
+    process.exit(0);
+  }
+  if (cfg.mode === 'hang') {
+    setInterval(() => {}, 1000);
+    return;
+  }
+  // A run that takes a while (to watch a UI refresh while Kane "runs").
+  if (cfg.delayMs) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(Number(cfg.delayMs), 20000));
+  if (cfg.mutateTest) fs.appendFileSync(path.join(cwd, files[0]), '\n## Step 9\n\nhealed step\n');
+  // Recordings, as 0.10.5 keeps them next to each test: output-<stem>/Result.md and
+  // .internal/steps/<n>-<md5>/flows/... A test without a recording is authored (written);
+  // with one it is replayed (untouched) unless cfg.reauthor rewrites it (a replay miss that
+  // re-authored, which --no-adaptive-heal is meant to prevent).
+  for (const f of files) {
+    const dir = path.join(cwd, path.dirname(f), `output-${path.basename(f).replace(/_test\.md$/, '')}`);
+    if (fs.existsSync(dir) && !cfg.reauthor) continue;
+    fs.mkdirSync(path.join(dir, '.internal', 'steps', '1-abcdef12', 'flows', '1'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'Result.md'), `# Result\n\n1. navigate {{app_url}}/ - passed\n2. click Developer Settings - passed\n3. click API Keys - passed\n4. click Generate Key - passed\n\nrecorded ${cfg.reauthor ? 'again' : 'once'} (${f})\n`);
+    fs.writeFileSync(path.join(dir, '.internal', 'steps', '1-abcdef12', 'flows', '1', 'flow.json'), JSON.stringify({ step: 1, recordedAt: cfg.reauthor ? 'second' : 'first' }));
+  }
+  if (cfg.pack) {
+    fs.mkdirSync(path.join(cwd, '.testmuai', 'evidence'), { recursive: true });
+    fs.copyFileSync(cfg.pack, path.join(cwd, '.testmuai', 'evidence', `${cfg.packName || 'run'}.evidence`));
+  }
+  if (cfg.appendRecord) {
+    const crypto = require('node:crypto');
+    const ctx = path.join(cwd, '.context');
+    const hashes = JSON.parse(fs.readFileSync(path.join(ctx, 'fake-hashes.json'), 'utf8'));
+    const seq = fs.readdirSync(path.join(ctx, 'commits')).length + 1;
+    const body = JSON.stringify({ seq, prev_hash: hashes[String(seq - 1)], ts: new Date().toISOString(), proposal_id: null, nodes: [], edges: [], review: [], supersessions: [], executions: [{ verdict: 'passed' }], source_head_moves: {}, schema_version: 'assurance/context@1', parents: [hashes[String(seq - 1)]], intent_verb: cfg.appendRecord, created_by: { build: '0.10.5', by: { kind: 'ai', id: 'exec-sync' } } });
+    const hex = crypto.createHash('sha256').update(body).digest('hex');
+    fs.writeFileSync(path.join(ctx, 'commits', `${String(seq).padStart(6, '0')}-${hex.slice(0, 12)}.json`), body);
+    hashes[String(seq)] = `sha256:${hex}`;
+    fs.writeFileSync(path.join(ctx, 'fake-hashes.json'), JSON.stringify(hashes));
+  }
+  out({ type: 'testrun_summary', members: files.length, v: 1 });
+  process.exit(cfg.exit ?? 0);
+}
+
 const resumeIdx = argv.indexOf('--resume');
 const keys = [resumeIdx >= 0 ? `resume:${argv[resumeIdx + 1]}` : null, `${argv[0]} ${argv[1]}`, argv[0]].filter(Boolean);
 const reply = keys.map((k) => script[k]).find(Boolean);

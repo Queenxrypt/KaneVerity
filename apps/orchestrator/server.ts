@@ -22,6 +22,7 @@ import { EXPLORATION_MODES } from './src/correct/explore.ts';
 import { AssuranceError, RequirementsService } from './src/assurance/service.ts';
 import { AssuranceJobs, publicJob } from './src/assurance/jobs.ts';
 import { AssuranceUseCases } from './src/assurance/usecases.ts';
+import { AssuranceDesigns } from './src/assurance/designs.ts';
 import { acquireInstanceLock } from './src/instanceLock.ts';
 import { JOB_KINDS } from './src/assurance/commands.ts';
 import { isTutorialId } from './src/assurance/store.ts';
@@ -131,7 +132,7 @@ function checkUrlPair(docsUrl: unknown, appUrl: unknown): Project {
   return { docsUrl: docsUrl.trim(), docsOrigin, appUrl: appUrl.trim(), appOrigin, savedAt: new Date().toISOString() };
 }
 
-export function createOrchestrator(runner = new Runner(), corrections = new CorrectionService(runner), requirements = new RequirementsService(), jobs = new AssuranceJobs({ requirements }), usecases = new AssuranceUseCases(jobs, requirements)): Server {
+export function createOrchestrator(runner = new Runner(), corrections = new CorrectionService(runner), requirements = new RequirementsService(), jobs = new AssuranceJobs({ requirements }), usecases = new AssuranceUseCases(jobs, requirements), designs = new AssuranceDesigns(usecases, jobs)): Server {
   return createServer(async (req, res) => {
     try {
       const host = (req.headers.host ?? '').toLowerCase();
@@ -324,6 +325,48 @@ export function createOrchestrator(runner = new Runner(), corrections = new Corr
         }
       }
 
+      // Assurance B5: test-design review. Reading runs the free use-case retrieval (B3); review
+      // and the app_url approval are KaneVerity's own records. No Kane write, design or test run.
+      // Pre-execution steps (Kane approval writes of design items, the run variables file, a
+      // free dry run) and the paid test run are only here, bound to one use case's content id.
+      const xMatch = /^\/api\/assurance\/designs\/([^/]+)\/([a-f0-9]{64})\/executions\/([^/]+)\/reconcile$/.exec(p);
+      if (xMatch && method === 'POST') {
+        const [, tutorialId, ucHex, executionId] = xMatch;
+        await readBody(req);
+        const e = await designs.reconcileExecution(tutorialId, ucHex, executionId);
+        return json(res, 200, await designs.view(tutorialId, ucHex, e.reason));
+      }
+      const bMatch = /^\/api\/assurance\/designs\/([^/]+)\/([a-f0-9]{64})(?:\/(retrieve|review|app-url|run-variables|kane-write|kane-reconcile|dry-run|execute))?$/.exec(p);
+      if (bMatch) {
+        const [, tutorialId, ucHex, action] = bMatch;
+        if (method === 'GET' && !action) return json(res, 200, await designs.view(tutorialId, ucHex));
+        if (method === 'POST' && action) {
+          const body = await readBody(req);
+          if (action === 'retrieve') {
+            await designs.retrieve(tutorialId, ucHex);
+            return json(res, 200, await designs.view(tutorialId, ucHex));
+          }
+          if (action === 'run-variables') {
+            await designs.writeRunVariables(tutorialId, ucHex, body);
+            return json(res, 200, await designs.view(tutorialId, ucHex, 'Run variables file written. Read the design again before the dry run.'));
+          }
+          if (action === 'kane-write' || action === 'kane-reconcile') {
+            const w = action === 'kane-write' ? await designs.kaneWrite(tutorialId, ucHex, body) : await designs.reconcileKaneWrite(tutorialId, ucHex, body);
+            return json(res, 200, await designs.view(tutorialId, ucHex, w.reason));
+          }
+          if (action === 'dry-run') {
+            const d = await designs.dryRun(tutorialId, ucHex);
+            return json(res, 200, await designs.view(tutorialId, ucHex, d.reason));
+          }
+          if (action === 'execute') {
+            const x = await designs.execute(tutorialId, ucHex, body);
+            return json(res, 202, await designs.view(tutorialId, ucHex, x.reason));
+          }
+          const e = action === 'review' ? await designs.review(tutorialId, ucHex, body) : await designs.approveAppUrl(tutorialId, ucHex, body);
+          return json(res, 200, await designs.view(tutorialId, ucHex, `Recorded: ${e.kind} ${e.decision}.`));
+        }
+      }
+
       // V2: a test-design job's answer (paid, re-checked) and stop/abandon, from its use case.
       const dMatch = /^\/api\/assurance\/usecases\/([^/]+)\/([a-f0-9]{64})\/design\/([^/]+)\/(answer|cancel)$/.exec(p);
       if (dMatch && method === 'POST') {
@@ -457,7 +500,10 @@ if (isMain) {
   const usecases = new AssuranceUseCases(jobs, requirements);
   // An approval write that was pending when the orchestrator stopped becomes "unknown" (never retried).
   await usecases.init();
-  const server = createOrchestrator(runner, undefined, requirements, jobs, usecases);
+  const designs = new AssuranceDesigns(usecases, jobs);
+  // A design-item approval write that was pending when the orchestrator stopped becomes "unknown".
+  await designs.init();
+  const server = createOrchestrator(runner, undefined, requirements, jobs, usecases, designs);
   server.on('error', (err: NodeJS.ErrnoException) => {
     console.error(err.code === 'EADDRINUSE' ? `[orchestrator] Port ${config.port} is already in use.` : `[orchestrator] ${err.message}`);
     process.exit(1);

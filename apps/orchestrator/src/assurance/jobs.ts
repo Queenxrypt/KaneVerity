@@ -275,6 +275,34 @@ export class AssuranceJobs extends EventEmitter {
     return this.enqueue('review', { kind: 'review', tutorialId: p.tutorialId, writeId: p.writeId, ucCid: p.ucCid, reviewer: p.reviewer }, p.tutorialId, null, null);
   }
 
+  /** B5: plan the approved tests (free). Called only by the design review service. */
+  async startDryRun(p: { tutorialId: string; files: string[] }): Promise<JobRecord> {
+    this.gate('dryrun', undefined);
+    if (!isTutorialId(p.tutorialId)) throw new AssuranceError(404, 'Tutorial not found.');
+    const busy = [...this.records.values()].find((j) => j.tutorialId === p.tutorialId && (j.state === 'queued' || j.state === 'running'));
+    if (busy) throw new AssuranceError(409, `A job for this tutorial is already ${busy.state}.`);
+    return this.enqueue('dryrun', { kind: 'dryrun', tutorialId: p.tutorialId, files: p.files }, p.tutorialId, null, null);
+  }
+
+  /**
+   * B5: run the approved tests. Paid: Assurance mode "all" and an explicit confirmation.
+   * Called only by the design execution endpoint after its fresh checks; right before Kane
+   * starts, the run preflight re-checks KaneVerity's state against the readiness fingerprint.
+   */
+  async startTestRun(p: { tutorialId: string; ucCid: string; files: string[]; reviewer: string; readinessSha256: string; requirements: JobRecord['requirements']; confirm: unknown }): Promise<JobRecord> {
+    this.gate('testrun', p.confirm);
+    if (!isTutorialId(p.tutorialId)) throw new AssuranceError(404, 'Tutorial not found.');
+    const busy = [...this.records.values()].find((j) => j.tutorialId === p.tutorialId && (j.state === 'queued' || j.state === 'running'));
+    if (busy) throw new AssuranceError(409, `A job for this tutorial is already ${busy.state}.`);
+    return this.enqueue('testrun', { kind: 'testrun', tutorialId: p.tutorialId, ucCid: p.ucCid, files: p.files, reviewer: p.reviewer, readinessSha256: p.readinessSha256 }, p.tutorialId, p.requirements, null);
+  }
+
+  /** Set by the design review service: a reason to refuse a test run right before Kane starts, or null. */
+  private runPreflight: ((j: JobRecord) => Promise<string | null>) | null = null;
+  setRunPreflight(fn: (j: JobRecord) => Promise<string | null>) {
+    this.runPreflight = fn;
+  }
+
   /** Answer a paused job's questions; starts a resume job (it uses credits). */
   /**
    * Answer a paused job. A test-design session (V2) is answered only through its use
@@ -490,6 +518,16 @@ export class AssuranceJobs extends EventEmitter {
       }
     }
 
+    // B5: a test run re-checks every pre-execution gate it can without Kane (fingerprints).
+    if (j.params.kind === 'testrun') {
+      const refusal = this.runPreflight ? await this.runPreflight(j) : 'the pre-execution checks are not available in this process.';
+      if (refusal) {
+        j.state = 'refused';
+        j.reason = scrub(`Not started: ${refusal} No test ran and no credits were used.`);
+        return;
+      }
+    }
+
     const paid = JOB_KINDS[j.kind].paid;
     if (paid) j.credits.balanceBefore = await this.balance(ws);
 
@@ -516,6 +554,20 @@ export class AssuranceJobs extends EventEmitter {
       const o = outcomeOf(s, r.exitCode, r.killed);
       j.state = r.cancelled ? 'cancelled' : o.outcome;
       j.reason = scrub(r.cancelled ? 'Cancelled while Kane was running. Its outcome is unknown.' : o.reason);
+    } else if (j.kind === 'dryrun' || j.kind === 'testrun') {
+      // B5: the outcome here is only whether Kane finished. What the plan or the run showed
+      // is read from the output (dry run) or the evidence pack (run) by the design service.
+      // A test run exits 1 when a test fails: that is a finished run, not an error.
+      if (r.killed) {
+        j.state = r.cancelled ? 'cancelled' : 'interrupted';
+        j.reason = 'Stopped before Kane finished. Its outcome is unknown.';
+      } else if (r.exitCode === 0 || (j.kind === 'testrun' && r.exitCode === 1)) {
+        j.state = 'complete';
+        j.reason = j.kind === 'dryrun' ? 'Planned; nothing ran.' : `Kane finished the run (exit ${r.exitCode}). KaneVerity checks the evidence next.`;
+      } else {
+        j.state = r.exitCode === 2 ? 'refused' : 'error';
+        j.reason = scrub(`Kane exited with code ${r.exitCode}. ${r.stderrTail.trim().split(/\r?\n/).pop() ?? ''}`.trim());
+      }
     } else if (j.kind === 'ingest') {
       const receipts = parseIngestReceipt(r.stdout);
       j.summary.ingested = receipts.map((x) => ({ sourceId: x.sourceId, status: x.status }));

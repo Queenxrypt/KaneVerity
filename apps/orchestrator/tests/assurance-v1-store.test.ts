@@ -11,6 +11,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { checkCitations } from '../src/assurance/citations.ts';
 import { blobPath, readStore } from '../src/assurance/storeReader.ts';
+import { readDesignGraph } from '../src/assurance/designGraph.ts';
 import { TESTS_DIR } from './helpers.ts';
 
 const REPO = path.resolve(TESTS_DIR, '..', '..', '..');
@@ -54,8 +55,9 @@ test('the actual V1 store reads, passes the checks, and shows exactly the V1 fin
   await cp(STORE, path.join(tmp, '.context'), { recursive: true });
   const store = await readStore(path.join(tmp, '.context'), '0.10.5');
   assert.equal(store.ok, true, store.problems.join(' '));
-  // 2 records (V1), or 3 after V-B4b wrote KaneVerity's verified approval (checked below).
-  assert.ok(store.records === 2 || store.records === 3, `records: ${store.records}`);
+  // 2 records (V1), 3 after V-B4b wrote KaneVerity's verified approval, or 7 after the
+  // approved V2 test design added records 4-7 (all checked below).
+  assert.ok([2, 3, 7].includes(store.records), `records: ${store.records}`);
   assert.deepEqual(store.builds, ['0.10.5']);
   assert.equal(store.sources.length, 1);
   assert.equal(store.sources[0].sourceId, 'kv-generate-an-api-key');
@@ -91,7 +93,19 @@ test('the actual V1 store reads, passes the checks, and shows exactly the V1 fin
   // Kane's own "skipped" verdict is read for information only.
   assert.deepEqual(store.kaneVerdicts.map((v) => [v.resolution, v.attributedTo]), [['skipped', 'human:owner']]);
   const REC2 = 'sha256:3be455d75e7bfa9a789eae9b0db6809ee8af6c2711a29bde04f47939f33fae65';
-  if (store.records === 3) {
+  if (store.records === 7) {
+    // After V2: records 4-7 are exactly the one approved test design of uc-1 (generation 1,
+    // phases acs, scenarios, wiring, tests), by Kane's design agent, with no review items
+    // and nothing superseded.
+    const g = await readDesignGraph(path.join(tmp, '.context'), null);
+    const design = g.records.slice(3);
+    assert.deepEqual(design.map((x) => [x.seq, x.intentVerb, x.createdBy, x.designPhase?.phase, x.designPhase?.generation, x.designPhase?.ucRoot]), [4, 5, 6, 7].map((seq, i) => [seq, 'design', 'ai:design-agent', ['acs', 'scenarios', 'wiring', 'tests'][i], 1, uc.cid]));
+    assert.equal(g.supersededNodes.size, 0);
+    assert.deepEqual([...g.nodes.values()].filter((n) => n.seq >= 4).map((n) => n.label).sort(), ['ac', 'ac', 'ac', 'gap', 'scenario', 'test']);
+    // The rest of this test checks record 3 and replays V-B4a onto the V1 records.
+    for (const f of (await readdir(path.join(tmp, '.context', 'commits'))).sort().slice(3)) await rm(path.join(tmp, '.context', 'commits', f));
+  }
+  if (store.records >= 3) {
     // After V-B4b: record 3 is exactly one approval of uc-1, recorded for KaneVerity's
     // self-declared reviewer, review-only, linked to record 2. Nothing else was added.
     assert.equal(store.reviews.length, 1);

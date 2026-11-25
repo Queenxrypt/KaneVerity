@@ -532,6 +532,8 @@ test('bypass flags are never passed to Kane, and the review job cannot be starte
     { kind: 'view' },
     { kind: 'fsck' },
     { kind: 'review', tutorialId: T, writeId: 'w20261122-120000-abcdef', ucCid: UC, reviewer: REVIEWER },
+    { kind: 'dryrun', tutorialId: T, files: ['.testmuai/tests/a_test.md'] },
+    { kind: 'testrun', tutorialId: T, ucCid: UC, files: ['.testmuai/tests/a_test.md'], reviewer: REVIEWER, readinessSha256: 'a'.repeat(64) },
   ];
   assert.deepEqual(samples.map((s) => s.kind).sort(), Object.keys(JOB_KINDS).sort(), 'every kind is checked');
   for (const s of samples) {
@@ -562,6 +564,11 @@ test('bypass flags are never passed to Kane, and the review job cannot be starte
   assert.equal(r.status, 400);
   const st = await j(await fetch(`${api}/api/assurance/status`));
   assert.ok(!st.kinds.some((k: { kind: string }) => k.kind === 'review'));
+  // B5: the dry run and the test run are internal too.
+  for (const kind of ['dryrun', 'testrun']) {
+    assert.equal((await post('/api/assurance/jobs', { kind, tutorialId: T, confirm: { paid: true } })).status, 400, kind);
+    assert.ok(!st.kinds.some((k: { kind: string }) => k.kind === kind), kind);
+  }
 });
 
 test('a damaged review history fails closed: nothing is shown as unreviewed or unlocked, and nothing overwrites it', async () => {

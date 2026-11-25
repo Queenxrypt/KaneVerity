@@ -159,7 +159,8 @@ Every paid step needs explicit approval with its estimate. No internal ceiling.
 ### 7.3 Fidelity check (the documentation as written)
 A designed test for the documented journey must keep every quoted UI label, exactly and in order;
 each documented outcome needs an assert step whose `@verifies` AC maps to it; no undocumented actions
-on the main path. A failing test cannot be approved for verification.
+on the main path. A failing test cannot be approved for verification. Built in B5 (section 13.4),
+with one criterion, scenario and test per outcome; it checks the design only and is never evidence.
 
 ### 7.4 Classification (kept)
 - **PASSED:** exit 0, `testrun_done.overall_status=passed`, member passed, **not healed**, valid and
@@ -221,9 +222,10 @@ portability; unobserved event fields.
 | B2 | Job runner: spawn, NDJSON parser, pause/answer loop, redaction, serialization, credit tracking; tested against a fake CLI built from the documented contract | None, then V0 |
 | **B3** | Ingest, extract, use-case review (built; review in KaneVerity only, section 12.3) | V1 |
 | **B4** | Use-case approvals recorded in Kane and verified; extended design gate (built, section 12.4). Design, design review and the fidelity check follow with their own approval | V-B4a (free), then V2 |
-| B5 | Execution via testrun, classification, evidence, coverage | V3, V4 |
-| B6 | Corrections: reconcile, re-design, Assurance retest, extended VERIFIED gate | V5 |
-| B7 | Reporting: coverage, history, docs | None |
+| **B5** | Test-design review: design read, deterministic checks, review history, app_url approval, readiness (built, section 13) | V2 (done), then a forced redesign |
+| B6 | Execution via testrun, classification, evidence, coverage | V3, V4 |
+| B7 | Corrections: reconcile, re-design, Assurance retest, extended VERIFIED gate | V5 |
+| B8 | Reporting: coverage, history, docs | None |
 
 Visual identity and UI/UX run on a separate track.
 
@@ -465,7 +467,7 @@ unchanged, and the copy was deleted afterwards. Validated:
 - **Not done:** no review was written to the real store; the real `uc-1` is unreviewed. Test design
   (V2) is not started.
 
-### 12.5 V2 preparation: test design safety (2026-11-24, built; no real design run yet)
+### 12.5 V2 preparation: test design safety (2026-11-24, built; real run: section 13.1)
 
 **Findings that led to it.** The B2 `design` job could be started from the generic jobs API with
 mode `all`. It had no tutorial binding, no design-gate check and no fresh read of the store, and it
@@ -522,10 +524,413 @@ passed only Kane's logical id (`uc-1`), not the approved content id.
     between these gaps and that one failure is inferred, not proven.
   - **Test isolation:** tests no longer load the developer's `.env` (see the README).
 
-**Still open for V2 (real run):**
+**Still open for V2 (real run)** (answered in section 13):
 
 - the real event stream and record shapes of design;
-- whether designed tests keep the exact labels and order (the fidelity check, section 7.3, is not
-  built);
+- whether designed tests keep the exact labels and order (the fidelity check, section 7.3, built
+  in B5);
 - the review of acceptance criteria and scenarios;
 - the cost.
+
+## 13. B5: test-design review (built 2026-11-25; no paid command, no Kane write, no test run)
+
+### 13.1 V2 real design run (2026-11-24, approved by the user)
+
+- One run of `design tests --use-case uc-1 --mode agent --max 1` through the use-case endpoint
+  (mode `all` only for that run, then back to `free`). Job `j20261124-224630-cfed4c`: complete, exit 0,
+  no pause, 62 s, **9.78 credits** (Kane's report and the balance difference agree).
+- Records #4–#7 (`ai:design-agent`, design generation 1): ac-1..3 (#4), sc-1 (#5), the
+  scenario-to-criteria links (#6), and gap-1 plus t-1 (#7). Kane also wrote
+  `.testmuai/tests/<name>_test.md` and `.testmuai/variables/assurance.json` (`app_url` declared,
+  empty). Records #1–#3 are unchanged.
+- **Mapping:** ac-1 is O2 (key in the list), ac-2 is O3 (`2 keys`), ac-3 is O1 (success message).
+- **Assertions:** t-1 has one structured check (ac-1); O1 and O3 appear only in the wording of
+  step 3. One scenario covers all three criteria.
+- **No `BOTH_STORES`:** that needs `.testmuai/assurance.json` (a project link), which doesn't
+  exist. Kane itself chooses `.testmuai/variables/assurance.json` when a `.context` store is present.
+
+### 13.2 Kane 0.10.5 behaviour verified for B5
+
+From the help text, the installed code and free reads; none of it from a paid run.
+
+- **Review:** `context review --verdicts` accepts any item whose trust is `derived` or `archived`
+  (criteria, scenarios, tests, gaps), by short id or content id, all-or-nothing.
+  - An `edited` verdict changes only `title`, `summary` and `risk`, so review cannot change a
+    test's steps.
+  - A rejection archives the item, so it needs `--allow-archive` and is refused in `--mode ci`.
+  - The review queue needs a terminal (`TTY_REQUIRED`).
+- **Test design:**
+  - **One check per test:** a test has exactly one structured `check`, attached to the step
+    tagged with its criterion. Check kinds: `presence`, `forbidden-presence`, `count`, `delta`,
+    `state-transition`, `absolute`, `bound`, `propagation`, `latency`, `graded`. `delta` and
+    `state-transition` need a baseline-capture step.
+  - **One-to-one:** scenario and test are strictly one-to-one (`CARDINALITY_VIOLATION`).
+  - **Already designed:** a use case with a live design generation is refused without `--force`
+    (`GENERATION_LIVE`). `--phase <p>` gets past the "already designed" refusal but not this one.
+  - **What `--force` retires:** its scope is the use case's live scenarios and the tests that
+    automate them; criteria are never in it. Only items whose type is in the committing phase
+    are retired, so `--force --phase scenarios` keeps ac-1..3 and supersedes sc-1, then t-1.
+    Successors are matched by `reuse_of`, then same criteria, then title, then paired test
+    (`lineage: 2`, always); unmatched items are superseded with no successor.
+  - **Generations:** a forced redesign starts a new generation (`supersedes_generation`); records
+    are never rewritten.
+  - **Gaps:** only `unmeasurable` and `budget-evicted` gaps can be retired, so an `incomplete` gap
+    keeps its `ref` even when the item it names is superseded.
+- **Execution:**
+  - **No approval check:** `testmd run` and `testrun run` do not check approval or trust; the only
+    signal is a design-time warning.
+  - **Per-criterion verdicts:** each criterion gets the worst status of the run's steps tagged
+    `@verifies` with it (read from the evidence pack's `result.yaml`).
+  - **Metadata, not evidence:** `oracle_mode` is the test's design-time `expected_mode`, and
+    `via_parent` marks a fact inherited from an importing test.
+  - **Coverage:** Kane counts a criterion as covered through the `verifies` link
+    (`live_verifies_edge`), not the check.
+  - **Dry run:** `testrun run --dry-run` builds the plan and stops before authentication; nothing
+    is written (checked on a disposable copy). An empty variable is only a warning ("typed as
+    written"); `testrun run` has no `--variables` option.
+  - **Variable loading:** global folder, then `.testmuai/variables/`, then `--variables-file`,
+    then inline `--variables` (`testmd run` only).
+  - **Hidden `--local`:** skips Test Manager uploads only.
+  - **Run-time writes:** a run writes `execution` records. A test file edited on disk is recorded
+    as a new version (`exec-supersede`), and its `base:` pin is rewritten.
+
+### 13.3 Questions resolved before building, and the fail-closed rules
+
+- **Design generations:** KaneVerity reads `design_phase` and `design_generation` from the records.
+  - The latest generation must have a complete tests phase.
+  - Every live scenario and test must come from it; criteria may be carried forward from an
+    earlier generation, which is shown as a note.
+  - Each test must automate exactly one live scenario, and each scenario must have exactly one
+    live test.
+  - Every design record's full hash must be known.
+- **Gaps:** every live gap of the use case is shown and must be acknowledged; none is ever dropped.
+  A gap whose `ref` names a superseded or unknown item is marked stale, and acknowledging it
+  needs `acknowledgeStale: true`.
+- **Execution evidence:** an earlier version of B5 made run-time evidence a pre-execution gate,
+  which no design could ever pass (a circular dependency). Corrected in section 13.8: evidence is
+  what a run produces, so it is checked **after** the run, and nothing is VERIFIED without it.
+
+### 13.4 Built
+
+- **`designGraph.ts`:** a read-only reader for design records (nodes, links, short ids,
+  supersessions, phases, generations). Unknown shapes are reported, never guessed.
+- **`designCheck.ts`** (pure):
+  - **Requirements:** S1–Sn and O1–On come from the stored requirements (line map and labels).
+  - **Outcome-to-criterion mapping:** by exact quoted values, then word overlap; an ambiguous or
+    missing match blocks.
+  - **Structure:** one criterion, one scenario and one test per outcome.
+  - **Per-outcome specification** (design level only, never evidence):
+    - a scenario that exercises only that criterion, and one test that verifies only it;
+    - a structured check aimed at it, of a kind that fits: an exact value for O1 and O3, or a
+      change from a captured baseline for O2;
+    - exactly one step tagged with it, stating an assertion and quoting the exact values;
+    - for O2, a baseline captured before that step.
+  - **Fidelity per test:**
+    - step 1 starts at `{{app_url}}/`;
+    - each documented label is acted on exactly once, in order (a label is "acted on" when an
+      action verb introduces it in the same clause);
+    - no undocumented quoted label and no other variable;
+    - any capture, or a step that is neither navigation nor an assertion, is an extra step that
+      needs approval.
+  - **Generated files:** each test's file must match Kane's stored test byte for byte and be
+    pinned to its definition. Any `*_test.md` that belongs to no live test blocks, because a run
+    could select it.
+- **`designs.ts`:**
+  - **Reading** (`POST /api/assurance/designs/:t/:ucHex/retrieve`): a fresh B3 retrieval (free
+    `fsck`, `list` and `view`), then the design graph, the generated files and the variables file.
+    It is accepted only if the records, `context list` and `context view` agree on items, short
+    ids, trust and links. It is saved as an append-only snapshot in `data/assurance/designs/<t>/`.
+  - **Reviewing** (`POST …/review`): decisions on criteria, scenarios, tests, each outcome's
+    mapping (target `O1`, `O2`, ...: bound to the outcome and the matched criterion's exact
+    content) and extra steps (all approve or reject), and on gaps (acknowledge only).
+    - A gap acknowledgement records the reason and the gap's reference as it was (`ref`,
+      `refState`, `refCid`). It resolves nothing: the gap stays in Kane and in every design read,
+      still marked stale, and a change to its reference makes the acknowledgement stale.
+    - The history is append-only in `data/assurance/design-reviews/<t>.json`, read fail-closed,
+      and written only while this orchestrator holds the data-folder lock.
+    - Each decision stores what it was made on (content ids and hashes, the minting record and its
+      hash, the test file's sha256 and pin, the links, the requirements and source) plus a hash
+      of that. When anything changes, the decision is stale and doesn't count.
+    - Decisions are refused while the read failed integrity, after a newer store read, while a
+      design or a Kane write is in progress, or without a reviewer. A test whose file differs
+      cannot be approved.
+  - **`app_url`** (`POST …/app-url`, `{value, confirm: true}`): only the connected project's
+    application origin, on loopback, with no path. The approval is bound to the variables file's
+    fingerprint. KaneVerity never writes Kane's file; the value is set for the run in KaneVerity's
+    own file (section 13.8).
+  - **Readiness:** pre-execution gates and post-execution verification, section 13.8.
+- **UI:** a "Test design review" card on the tutorial's material page shows readiness, the outcome
+  table (with run-time evidence "not available"), the mapping, criteria, scenarios, tests (each step
+  labelled navigation, capture, assertion or other), gaps, the `app_url` approval and the design
+  records.
+- **Tests:** `tests/assurance-design-check.test.ts` (9 pure cases) and
+  `tests/assurance-design-review.test.ts` (7 API cases with the fake Kane CLI, which now lists and
+  views design items as 0.10.5 does).
+
+### 13.5 Limitations
+
+- **Text rules:** natural-language steps are checked with exact rules (quotes, verbs, tags). A
+  paraphrase these rules can't recognise is left to the human review, which every item needs.
+- **Mapping:** the outcome-to-criterion mapping uses word overlap for an outcome without an exact
+  value (O2), so it needs your approval.
+- **History edits:** the history is append-only in code but not tamper-evident.
+- **Untested against real data:** the three-scenario structure exists only in tests. The real
+  design still has one scenario and one test, so readiness correctly blocks on structure and
+  outcomes.
+
+### 13.6 Next (each needs its own approval)
+
+1. **Forced redesign** for one scenario per outcome (sequence in section 13.7):
+   `design tests --use-case uc-1 --mode agent --max 3 --force --phase scenarios`.
+   Paid; it needs a one-off, recorded exception to the rule that `--force` is never passed, and
+   KaneVerity's design runner does not pass `--force` or `--phase` today, so that exception has to
+   be built and approved first. The agent may still not produce three single-outcome scenarios;
+   the B5 checks decide.
+2. **Then, through KaneVerity** (section 13.8): review, Kane approval writes, `app_url`, the dry
+   run, and the first paid run of the three tests. Its evidence decides VERIFIED.
+
+### 13.7 The redesign sequence (verified in Kane 0.10.5's code; not run)
+
+- **One command, not one per phase.** A design session ends ("complete") only when a commit
+  contains tests and every live scenario has a live test (`parity.missing` is empty). A
+  scenarios-phase commit alone does not end it; the agent goes on to wiring and tests in the same
+  command, as the V2 run did for all four phases.
+- **Entry:** `--phase scenarios` passes the phase-order check, because generation 1 has `acs`.
+  `--force` passes the live-generation check, and generation 2 starts with
+  `supersedes_generation: 1`. `--because` is not an option of `design tests`; in agent mode the
+  saved reason is "forced redesign (--force)".
+- **Paused for questions:** answered through the same session (`--resume <sid>`, KaneVerity's
+  design answer endpoint). The same generation continues: no new `--force`, and the remaining force
+  scope is kept in the session.
+- **Stopped before the tests phase** (error, crash, expiry): do **not** run `--phase tests`. The
+  phase-order check reads only the latest generation (2), which has no `acs` record, so it refuses
+  (`PHASE_ORDER`). A fresh `--force` would start generation 3. Either recovery needs its own
+  decision. Meanwhile the B5 checks block (no complete tests phase, an orphaned t-1, or a scenario
+  with no test).
+- **Expected records if it completes:**
+  - **Scenarios:** generation-2 marker, about three new scenarios, sc-1 superseded (by a
+    title-matched successor or by none).
+  - **Wiring:** each scenario linked to its criterion. If the agent re-sends a criterion with
+    changed text, it is superseded by a new id, and B5 then marks reviews of the old one stale.
+  - **Tests:** about three tests, t-1 superseded (by a paired successor or by none), and links
+    moved to the successors.
+  - **Kept:** gap-1 (`incomplete`) stays live and points at the superseded sc-1, so it shows as a
+    stale gap. Records #1–#7 are never rewritten.
+  - **Files:** new `*_test.md` files. Whether Kane removes t-1's old file is not known; if it stays,
+    B5 blocks on it as a stray file.
+
+### 13.8 Pre-execution readiness and post-execution verification (corrected 2026-11-25)
+
+The first B5 version required run-time assertion evidence **before** a run, so no run could ever
+start. Evidence is what a run produces; it now decides the result **after** the run, and nothing
+is VERIFIED without it.
+
+**State transitions** (each step is KaneVerity's own record, append-only, in
+`data/assurance/design-reviews/<t>.json`):
+
+1. **Design read:** a free retrieval and the B5 checks.
+2. **KaneVerity review:** each outcome's mapping, each criterion, scenario and test, extra steps,
+   and gaps (acknowledged).
+3. **Kane approval write per item** (`kane-write`, free): pending, then one of verified,
+   not_written, unknown or written_unverified.
+   - An unknown write blocks everything (use-case decisions too) until it is reconciled from the
+     store. It is never retried.
+4. **`app_url`:** approved, then set for the run (`run-variables`).
+5. **Dry run** (free): passed or failed, bound to the exact test files and every variables file.
+   - Any change to them makes it out of date.
+6. **Pre-execution ready:** all gates pass.
+   - Integrity and freshness, including the requirements matching the documentation.
+   - The use case is approved and verified (B4).
+   - The generation is complete, with one pair per outcome.
+   - Each mapping is approved, each outcome is specified, fidelity passes (extra steps
+     approved) and the files match Kane's stored tests.
+   - Reviews are done, gaps are acknowledged and Kane approvals are verified.
+   - `app_url` is approved and set, the dry run passed, and nothing else is active or unresolved.
+7. **Run** (`execute`, paid: mode `all` and `{confirm: {paid: true}}`):
+   - A fresh read first; every gate is re-checked, then fingerprinted.
+   - Right before Kane starts, the run preflight compares the test files, the variables files and
+     the set of test files with that fingerprint (no Kane read); any change refuses the run at no
+     cost.
+   - The run then moves from started to finished, refused or unknown.
+8. **Post-execution verification** (when the job ends): see below. The result is VERIFIED or
+   NOT_VERIFIED.
+   - A run that ends unknown (interrupted, crashed, timed out) blocks everything until it is
+     reconciled.
+   - Reconciling runs the same checks on what the run left, never runs it again, and is never
+     VERIFIED.
+
+**Post-execution verification, from Kane's evidence** (the format was checked on KaneVerity's own
+0.10.5 pack, `r20261121-151934-c23cad`):
+
+- **Nothing changed:**
+  - the test files are byte-identical;
+  - the set of `*_test.md` files and the variables files are unchanged;
+  - only `execution` records were added to the store (an `exec-supersede`, a node, a supersession
+    or a review is a mutation).
+- **The pack:**
+  - exactly one new pack in `.testmuai/evidence/`;
+  - `run.yaml` `status: finalized`, producer `kane-cli 0.10.5`;
+  - every surface and step URL on the application origin.
+- **Each outcome independently:**
+  - in the member whose `result.yaml` `definition_id` is the approved test's definition, an
+    `assert` step tagged (`verifies`) with that outcome's criterion only;
+  - the `ASSERTION` operation in `auteur/execution.json` whose `operation_id` is that step's
+    `action_id`, with `assertion_status: true`, `assertion_tree.status: passed` and every
+    sub-result passed;
+  - an **observed value recorded** (`variable_refs`) that equals the documented value, and the
+    DOM read that produced it (section 13.9). A yes/no analyzer result no longer counts.
+- **Never counted:** step status, wording, `@verifies` tags alone, `verifies` links, the
+  design-time `check`, `oracle_mode`, `via_parent` or Kane's coverage.
+
+**Kane facts verified for this** (installed 0.10.5 code):
+
+- **Variable loading:**
+  - Kane loads every `*.json` in `.testmuai/variables/` alphabetically, and a later file wins; the
+    run-time loader does the same (global folder, then local folder, `--variables-file`, inline;
+    local always beats global, proved in section 13.9).
+  - So `kaneverity-run.json` (after `assurance.json`) sets `app_url` for both the dry run and the
+    run, without touching Kane's file.
+  - `testrun run` has no `--variables` option.
+- **`--no-adaptive-heal`** (documented): a replay miss becomes terminal instead of re-authoring.
+  It does not stop a test's first run from authoring its steps, nor local execution records.
+- **`--local`** (hidden on `testmd run`/`testrun run`): skips Test Manager uploads only.
+  **`--no-testmd-sync`** (hidden; the coordinator passes it to members): skips the cloud bundle
+  push only. Neither stops local writes.
+  - KaneVerity uses neither. The run is `testrun run <files> --agent --headless
+    --no-adaptive-heal`; never `--force`, `--author` or `--push`.
+  - Local writes are detected afterwards instead.
+- **The dry run:** stops before authentication and writes nothing (checked on a disposable copy).
+  An empty variable is only a warning there, so KaneVerity treats it as a failure.
+
+**Not yet seen on a real run (fail-closed):** the `testrun` pack layout with several members, and
+`verifies` on `result.yaml` steps. Kane's code reads both, but if a real pack lacks them, every
+outcome is NOT VERIFIED until the reader is extended from that real evidence.
+
+**Tests:**
+
+- `assurance-run-evidence.test.ts`: 5 cases on the verifier (9 since 13.9).
+- `assurance-design-check.test.ts`: readiness with no evidence is ready; each missing gate blocks.
+- `assurance-design-execution.test.ts`: 3 end-to-end cases in mode `all` with the fake Kane CLI.
+  The fake's `testrun` plans and resolves variables like Kane's loader, and its packs follow the
+  0.10.5 shape.
+  - The whole path to ready, with refused and unknown Kane writes, the reconcile step and the
+    `app_url` dry-run failure along the way.
+  - No generic-API bypass, and the paid confirmation.
+  - VERIFIED from three independent assertions; NOT VERIFIED when O1's assertion is missing or
+    when the run superseded the design.
+  - A test file changed by the run: NOT VERIFIED, and the next run blocked.
+  - An interrupted run: blocked until reconciled, never re-run, never VERIFIED.
+
+### 13.9 Authoring and replay, DOM evidence, global variables, restarts (built 2026-11-25; no paid command run)
+
+The audit of 13.8 found four gaps. Kane records (authors) a test the first time it runs it, so
+the first run is never a replay. It also showed that an assertion's `observed` value alone does
+not prove the value was read from the page. Two other gaps were the global variables folder and
+runs left "started" across a restart. All four are now closed, and tested with the fake Kane CLI
+only.
+
+**Kane 0.10.5 authoring, verified in its code:**
+
+- A step is replayed only when `output-<test>/Result.md` has it passed, the step text's md5
+  matches, and a recording exists in `.internal/steps/<n>-<md5>/flows`. Otherwise it is authored.
+- `run.yaml` `environment.run_kind` is `author` if any step was authored, else `replay`.
+- The local recording (`output-<test>/`) is replaced only when a step was authored.
+
+**Two explicit phases** (`execute` needs `phase: "authoring"` or `"verification"`, else 400):
+
+1. **Authoring run** (paid; the pre-execution gates of 13.8): Kane records each approved test.
+   - The best result is **AUTHORED**, never VERIFIED, even with complete evidence.
+   - AUTHORED needs no mutation, a valid pack, and every recording present with no staging
+     folder. Otherwise it is NOT_VERIFIED ("Authoring failed: …").
+2. **Recording review** (KaneVerity decision, kind `recording`): the page shows Kane's
+   `Result.md` and the recording's fingerprint.
+   - An approval is accepted only when the **latest** authoring run was AUTHORED, its result
+     lists this exact recording (folder and sha256 over every file), and its pre-run fingerprint
+     has the same test file sha256.
+   - It binds the test file sha256 and the recording fingerprint, so any later change makes it
+     stale.
+   - A later failed authoring run, or a hand edit to the recording, makes approval impossible.
+3. **A fresh dry run** after the recording approvals (the dry-run binding includes the recording
+   fingerprints).
+4. **Verification run** (paid). Its own readiness is every authoring gate, plus approved current
+   recordings, plus a passed dry run newer than the last recording approval.
+   - The recordings are compared with the fingerprint before Kane starts and after it ends.
+   - Any change ("Kane re-recorded steps") is a mutation: NOT VERIFIED, and the approvals go
+     stale, which blocks the next verification.
+   - **VERIFIED requires `run_kind: replay`.** `--no-adaptive-heal` makes a replay miss terminal,
+     so a miss fails instead of silently authoring. If Kane still authors, `run_kind` and the
+     changed recordings both refuse VERIFIED.
+
+**DOM evidence per outcome** (`logs/*-actions.ndjson` in each pack member): the passed `ASSERTION`
+of 13.8 is still required. In addition, the analyzer action that produced the asserted variable
+must agree:
+
+- the same key, `status: success`, `code_js` present, locators present, and `output_value`
+  equal to the assertion's observed value;
+- **O1 (message):** the exact documented message (`API key generated successfully.`), read from a
+  `role=status` or `role=alert` region;
+- **O3 (value):** exactly `2 keys`, read with `innerText` or `textContent` from a non-text locator
+  (the count element). It must not be a boolean, and must not be a locator that contains the
+  expected text;
+- **O2 (before/after list):** the asserted value is the new key. In the **same execution** (the
+  same action log of the same pack member), the **same list** (the same locator as the asserted
+  read) must be read in full **before** the action and in full **after** it. Then:
+  - the before list is the original API-key list (not empty);
+  - every key from before is still listed afterwards (nothing replaced or lost);
+  - at least one key is new, and the asserted value is one of the new keys.
+
+  A list read is a JSON array of strings or one key per line. Empty, blank, repeated or
+  malformed entries, before (or after) reads that disagree with each other, a read of another
+  list, or a read only in another execution's log all refuse the outcome. A plain yes/no never
+  counts.
+
+There are no `analyzer_judgement` results any more.
+
+**Limitation, seen in the real 0.10.5 pack (`r20261121-151934-c23cad`):** O1 was found with a text
+locator (`internal:text="API key generated"i`) as a boolean, and O2 had no baseline read. Under
+these rules that run would be NOT VERIFIED. A real verification needs Kane to design the reads
+this way, which may need a redesign. That needs its own approval.
+
+**Global variables, proved with Kane's own loaders:**
+
+- The run-time loader (`chunk-TPCW5OU5` `Y`) merges `{...global, ...local}`, then the variables
+  file, inline values and parameters. Local files are sorted, and a later file wins.
+- The dry-run planner (`chunk-EHB55V23` `I`) does the same.
+- So a local definition always beats a global one, and `kaneverity-run.json` sorts after
+  `assurance.json`.
+- KaneVerity's readiness checks the **effective local winner** (`effectiveLocalAppUrl`). The
+  `app_url` gate passes only if the winner is `kaneverity-run.json` with the approved value.
+- With no local definition, a global value would apply. KaneVerity sees no local value, so the
+  gate stays closed.
+- A later local file that redefines `app_url` is detected as the winner and blocks.
+- The global folder is never read or fingerprinted: it cannot change the result while the local
+  winner is KaneVerity's file.
+- Regression test: `assurance-kane-variables.test.ts` calls the installed 0.10.5 loaders directly
+  (pure functions, no Kane command). It is skipped when 0.10.5 is not installed.
+
+**Restarts:** on start-up, an execution left `started` whose job is no longer queued or running
+becomes `unknown`. It then blocks everything until it is reconciled (never re-run, never
+VERIFIED).
+
+**Watching a run:** while a run is `started`, the page refreshes its status every 2 seconds and
+stops at a terminal state. Reconcile is offered only when Kane is no longer running it and the run
+is not about to be checked (the job is neither queued, running nor complete); the server refuses
+it while Kane runs. When an authoring run finishes AUTHORED, the page reads the design again (free,
+read-only) so the new recordings can be reviewed; a page opened later says when its recordings are
+older than the latest AUTHORED run. An AUTHORED run's outcomes are shown neutrally as recording
+status, never as verified.
+
+**Tests:**
+
+- `assurance-run-evidence.test.ts`: 12 cases on the verifier, 4 of them for O2 (a valid new key;
+  a list that loses an earlier key or is unchanged; missing, malformed, ambiguous or incomplete
+  reads; reads of another list or from another execution).
+- `assurance-kane-variables.test.ts`: 3 cases.
+- `assurance-design-execution.test.ts`: 3 cases.
+  - The gates and phases, AUTHORED and never VERIFIED.
+  - Recording review: a hand-edited recording is refused, and the dry run is required again.
+  - VERIFIED only from a pure replay with DOM evidence.
+  - NOT VERIFIED for weak O1 evidence, a superseded design, or a re-authoring replay miss (which
+    also blocks the next verification).
+  - A test file changed by an authoring run blocks, and its recordings cannot be approved.
+  - Interrupted and restarted runs.

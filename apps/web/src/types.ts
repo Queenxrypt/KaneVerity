@@ -294,3 +294,178 @@ export interface PublicRun {
   classification: Classification | null;
   warnings: string[];
 }
+
+// ---------------------------------------------------------------------------
+// Assurance B5: test-design review (GET/POST /api/assurance/designs/:t/:uc).
+// ---------------------------------------------------------------------------
+
+export interface DesignItemBaseView {
+  cid: string;
+  slug: string | null;
+  trust: string | null;
+  mintedSeq: number;
+  mintedHash: string | null;
+  generation: number | null;
+}
+export interface DesignAcView extends DesignItemBaseView {
+  label: 'ac';
+  text: string;
+}
+export interface DesignScenarioView extends DesignItemBaseView {
+  label: 'scenario';
+  title: string;
+  intent: string;
+  exercises: string[];
+}
+export interface DesignTestStepView {
+  n: number;
+  tags: string[];
+  assertHeading: boolean;
+  baseline: boolean;
+  text: string;
+}
+export interface DesignTestView extends DesignItemBaseView {
+  label: 'test';
+  title: string;
+  definitionId: string | null;
+  check: { kind: string; operator: string | null; operand: string | null; verifiedAgainst: string | null } | null;
+  automates: string[];
+  verifies: string[];
+  steps: DesignTestStepView[];
+  file: { path: string; sha256: string; bodyMatches: boolean; basePin: string | null } | null;
+}
+export interface DesignGapView extends DesignItemBaseView {
+  label: 'gap';
+  kind: string;
+  header: string;
+  prompt: string;
+  ref: string | null;
+  refState: 'live' | 'superseded' | 'unknown' | 'none';
+}
+export interface DesignCheckView {
+  ok: boolean;
+  problems: string[];
+  notes: string[];
+}
+export interface DesignOutcomeView {
+  outcome: string;
+  outcomeText: string;
+  acSlug: string | null;
+  scenarioCid: string | null;
+  testCid: string | null;
+  assertStep: number | null;
+  specified: boolean;
+  problems: string[];
+  evidence: 'not_available';
+}
+export interface DesignFidelityView {
+  testCid: string;
+  testSlug: string | null;
+  ok: boolean;
+  problems: string[];
+  steps: { n: number; kind: 'navigation' | 'capture' | 'assertion' | 'other'; labels: string[]; actions: string[]; asserts: boolean; captures: boolean }[];
+  extraSteps: { n: number; text: string }[];
+}
+export interface DesignDecisionView {
+  kind: 'ac' | 'scenario' | 'test' | 'gap' | 'mapping' | 'extra_step' | 'recording';
+  target: string;
+  label: string;
+  required: 'approved' | 'acknowledged';
+  state: 'none' | 'approved' | 'rejected' | 'acknowledged';
+  stale: boolean;
+  at: string | null;
+  reason: string | null;
+}
+export interface DesignOutcomeEvidenceView {
+  outcome: string;
+  verified: boolean;
+  problems: string[];
+  basis: 'dom_value' | 'dom_baseline_change' | null;
+  evidence: {
+    member: string;
+    stepOrdinal: number;
+    actionId: string;
+    assertionId: string | null;
+    operator: string | null;
+    expected: string | null;
+    observed: string | null;
+    locator: string | null;
+    domCode: string | null;
+    baseline: { locator: string; logFile: string; beforeStep: number; before: string[]; afterStep: number; after: string[]; added: string[] } | null;
+  } | null;
+}
+/** Kane's recording of one test (output-<test>/): what an AUTHORED run recorded, for review. */
+export interface DesignRecordingView {
+  testCid: string;
+  slug: string | null;
+  dir: string | null;
+  exists: boolean;
+  staging: boolean;
+  sha256: string | null;
+  files: number;
+  resultMd: string | null;
+  state: 'none' | 'approved' | 'rejected' | 'acknowledged';
+  stale: boolean;
+  at: string | null;
+  ok: boolean;
+  reason: string;
+}
+export interface DesignExecutionView {
+  executionId: string;
+  phase: 'authoring' | 'verification';
+  jobId: string | null;
+  state: 'started' | 'refused' | 'unknown' | 'finished' | 'reconciled';
+  at: string;
+  reason: string;
+  verdict: 'AUTHORED' | 'VERIFIED' | 'NOT_VERIFIED' | null;
+  mutation: string[];
+  problems: string[];
+  outcomes: DesignOutcomeEvidenceView[];
+  packOk: boolean | null;
+  runKind: string | null;
+  packProblems: string[];
+  /** Kane is still running this run (it is watched, never reconciled). */
+  kaneRunning: boolean;
+  canReconcile: boolean;
+}
+export interface DesignReviewResponse {
+  tutorialId: string;
+  ucCid: string;
+  mode: AssuranceMode;
+  reviewer: { label: string | null; problem: string | null; selfDeclared: true };
+  note: string | null;
+  design: null | {
+    snapshot: number;
+    retrievedAt: string;
+    useCaseSnapshot: number;
+    integrity: { ok: boolean; problems: string[] };
+    store: { records: number; tipHash: string | null };
+    requirements: { version: number; reqSha256: string; docSha256: string } | null;
+    designRecords: { seq: number; hash: string | null; phase: string | null; generation: number | null; completeness: string | null; supersedesGeneration: number | null }[];
+    acs: DesignAcView[];
+    scenarios: DesignScenarioView[];
+    tests: DesignTestView[];
+    gaps: DesignGapView[];
+    strayTestFiles: { path: string; id: string | null }[];
+    variables: { path: string; sha256: string | null; appUrlDeclared: boolean; appUrlHasValue: boolean };
+  };
+  documented?: { steps: { item: string; text: string; labels: string[]; source: string }[]; outcomes: { item: string; text: string; labels: string[]; source: string }[] };
+  evaluation?: {
+    generation: DesignCheckView & { latest: number | null; phasesInLatest: string[] };
+    structure: DesignCheckView;
+    mapping: { ok: boolean; entries: { outcome: string; acCid: string | null; acSlug: string | null; problem: string | null }[]; problems: string[] };
+    outcomes: DesignOutcomeView[];
+    fidelity: DesignFidelityView[];
+    files: DesignCheckView;
+    gaps: { cid: string; slug: string | null; stale: boolean; message: string }[];
+  };
+  reviews?: DesignDecisionView[];
+  appUrl?: { proposed: string | null; state: 'none' | 'approved'; stale: boolean; value?: string | null; at: string | null; declaredByKane: boolean; fileHasValue: boolean; runFile: string; runFileValue: string | null; winnerFile?: string | null; writesKaneFile: false };
+  kaneApprovals?: { label: string; target: string; kind: string; ok: boolean; state: string; reason: string; kaneSeq: number | null; writeId: string | null }[];
+  dryRun?: { ok: boolean; reason: string; current: boolean; latest: { id: string; at: string; state: 'passed' | 'failed' | 'unknown'; reason: string; unresolved: string[]; files: string[] } | null };
+  execution?: DesignExecutionView | null;
+  readiness?: { ready: boolean; items: { id: string; label: string; ok: boolean; reason: string }[] };
+  verificationReadiness?: { ready: boolean; items: { id: string; label: string; ok: boolean; reason: string }[] };
+  recordings?: DesignRecordingView[];
+  canReview?: boolean;
+}

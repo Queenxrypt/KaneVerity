@@ -566,6 +566,7 @@ export class AssuranceUseCases {
       if (blocking) throw new AssuranceError(409, this.lockedMessage(blocking));
       const designing = await this.designActive(tutorialId);
       if (designing) throw new AssuranceError(409, `A test design for this tutorial is ${designing.state} (job ${designing.jobId}). Decisions are locked until it finishes.`);
+      await this.refuseWhileExternal(tutorialId);
       const snap = await this.latest(tutorialId);
       const uc = snap?.useCases.find((u) => u.cid === cid);
       if (!snap || !uc) throw new AssuranceError(404, 'Use case not found in the latest retrieval.');
@@ -609,7 +610,10 @@ export class AssuranceUseCases {
     if (!isTutorialId(tutorialId)) throw new AssuranceError(404, 'Tutorial not found.');
     if (typeof ucHex !== 'string' || !UC_HEX.test(ucHex)) throw new AssuranceError(404, 'Use case not found.');
     this.refuseWhileWriting(tutorialId);
-    return this.serial(`review:${tutorialId}`, () => this.writeLocked(tutorialId, `sha256:${ucHex}`));
+    return this.serial(`review:${tutorialId}`, async () => {
+      await this.refuseWhileExternal(tutorialId);
+      return this.writeLocked(tutorialId, `sha256:${ucHex}`);
+    });
   }
 
   /** Settle an unknown write by reading Kane's store. Never runs the write again. */
@@ -648,6 +652,31 @@ export class AssuranceUseCases {
 
   private async designActive(tutorialId: string): Promise<JobRecord | null> {
     return (await this.designJobs(tutorialId)).find((j) => j.state === 'queued' || j.state === 'running') ?? null;
+  }
+
+  /** B5: set by the design review service; a reason use-case decisions, writes and designs must wait (a design-item write or a test run unresolved), or null. */
+  private externalBusy: ((tutorialId: string) => Promise<string | null>) | null = null;
+  setExternalBusy(fn: (tutorialId: string) => Promise<string | null>) {
+    this.externalBusy = fn;
+  }
+
+  private async refuseWhileExternal(tutorialId: string) {
+    const r = this.externalBusy ? await this.externalBusy(tutorialId) : null;
+    if (r) throw new AssuranceError(409, `${r} Use-case decisions and writes wait until it is settled.`);
+  }
+
+  /**
+   * B5: why the tutorial's Assurance material is changing right now (an approval being
+   * written to Kane, a write with an unknown outcome, a design queued or running), or
+   * null. Design review refuses to read or record anything while this is set.
+   */
+  async busyReason(tutorialId: string): Promise<string | null> {
+    if (this.writing.has(tutorialId)) return 'An approval is being written to Kane.';
+    const blocking = blockingWrite((await this.log(tutorialId)).kaneWrites);
+    if (blocking) return this.lockedMessage(blocking);
+    const designing = await this.designActive(tutorialId);
+    if (designing) return `A test design for this tutorial is ${designing.state} (job ${designing.jobId}).`;
+    return null;
   }
 
   /**
@@ -707,6 +736,7 @@ export class AssuranceUseCases {
       if (typeof max !== 'number' || !Number.isInteger(max) || max < 1 || max > 8) throw new AssuranceError(400, 'max must be a whole number from 1 to 8.');
       const blocking = blockingWrite((await this.log(tutorialId)).kaneWrites);
       if (blocking) throw new AssuranceError(409, this.lockedMessage(blocking));
+      await this.refuseWhileExternal(tutorialId);
       const prev = await this.previousDesign(tutorialId, cid);
       if (prev.block) throw new AssuranceError(409, prev.block);
       if (prev.needsAck && b.acknowledgePrevious !== prev.needsAck) {
