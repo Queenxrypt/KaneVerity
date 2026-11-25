@@ -3,7 +3,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { actionLabels, evaluateDesign, parseTestSteps, quotedLabels, type DesignSnapshot, type Requirements, type TestItem } from '../src/assurance/designCheck.ts';
+import { actionLabels, evaluateDesign, parseTestSteps, quotedLabels, recognisedSupersession, type DesignSnapshot, type Requirements, type TestItem } from '../src/assurance/designCheck.ts';
 import { computeReadiness, decisionStatus, type DesignReviewEntry, type PreExecutionInput } from '../src/assurance/designs.ts';
 
 const REQ: Requirements = {
@@ -268,4 +268,45 @@ test('pre-execution: a missing or rejected Kane approval, an unwritten app_url, 
   assert.match(gate(i, 'idle').reason, /Reconcile it first/);
   i = readyInput((x) => (x.ev = evaluateDesign(snapshot((s) => (s.tests[0].file!.bodyMatches = false)), REQ)));
   assert.equal(gate(i, 'files').ok, false, 'a stale test-file fingerprint blocks');
+});
+
+test("supersessions: only reasons Kane's committer writes, or KaneVerity's own evolve instruction, are recognised", () => {
+  const ins = 'Design exactly three scenario/test pairs for uc-1.';
+  // Kane's own reasons (0.10.5 committer).
+  for (const r of [
+    '--force redesign of uc-1 by design-agent',
+    '--force redesign of uc-1 by design-agent (reuse_of successor)',
+    '--force redesign of uc-1 by design-agent (title-matched successor)',
+    '--force redesign of uc-1 by design-agent (same-criteria successor)',
+    '--force redesign of uc-1 by design-agent (paired test successor)',
+    'AC re-emitted with changed content by design-agent (text-matched successor)',
+    'orphaned: its scenario sc-2 was retired; retired with it by the redesign of uc-1 (design-agent)',
+    // An evolve: KaneVerity's own instruction as the reason, with or without a Kane tag.
+    `${ins} — evolve by design-agent`,
+    `${ins} — evolve by design-agent (AC text-matched successor)`,
+    `${ins} — evolve by design-agent (orphaned criterion)`,
+  ])
+    assert.equal(recognisedSupersession(r, [ins]), true, r);
+  // Anything else is not.
+  for (const r of [
+    '',
+    'cleaned up by hand',
+    '--force redesign of uc-1 by design-agent (made up successor)',
+    '--force redesign of uc-1 by design-agent (reuse_of successor) and more',
+    `${ins} — evolve by design-agent (made up successor)`,
+    `Another instruction — evolve by design-agent`,
+    `${ins} - evolve by design-agent`,
+    `${ins} — evolve by design agent`,
+  ])
+    assert.equal(recognisedSupersession(r, [ins]), false, r);
+  // Without a recorded KaneVerity instruction, no evolve reason is recognised.
+  assert.equal(recognisedSupersession(`${ins} — evolve by design-agent`, []), false);
+});
+
+test('a supersession that is not recognised blocks the design generation', () => {
+  const ev = evaluateDesign(snapshot((x) => (x.supersessions = [{ seq: 10, label: 'test', old: 't-1', next: null, reason: 'exec-supersede of an edited file', recognised: false }])), REQ);
+  assert.equal(ev.generation.ok, false);
+  assert.match(ev.generation.problems.join(' '), /Record #10 superseded test t-1 for a reason KaneVerity does not recognise \("exec-supersede of an edited file"\)/);
+  const ok = evaluateDesign(snapshot((x) => (x.supersessions = [{ seq: 8, label: 'scenario', old: 'sc-1', next: 'sc-2', reason: '--force redesign of uc-1 by design-agent (reuse_of successor)', recognised: true }])), REQ);
+  assert.equal(ok.generation.problems.some((p) => /does not recognise/.test(p)), false);
 });

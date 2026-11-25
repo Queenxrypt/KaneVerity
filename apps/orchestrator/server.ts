@@ -336,7 +336,7 @@ export function createOrchestrator(runner = new Runner(), corrections = new Corr
         const e = await designs.reconcileExecution(tutorialId, ucHex, executionId);
         return json(res, 200, await designs.view(tutorialId, ucHex, e.reason));
       }
-      const bMatch = /^\/api\/assurance\/designs\/([^/]+)\/([a-f0-9]{64})(?:\/(retrieve|review|app-url|run-variables|kane-write|kane-reconcile|dry-run|execute))?$/.exec(p);
+      const bMatch = /^\/api\/assurance\/designs\/([^/]+)\/([a-f0-9]{64})(?:\/(retrieve|review|app-url|run-variables|kane-write|kane-reconcile|dry-run|execute|evolve))?$/.exec(p);
       if (bMatch) {
         const [, tutorialId, ucHex, action] = bMatch;
         if (method === 'GET' && !action) return json(res, 200, await designs.view(tutorialId, ucHex));
@@ -358,6 +358,7 @@ export function createOrchestrator(runner = new Runner(), corrections = new Corr
             const d = await designs.dryRun(tutorialId, ucHex);
             return json(res, 200, await designs.view(tutorialId, ucHex, d.reason));
           }
+          if (action === 'evolve') return json(res, 202, publicJob(await designs.evolve(tutorialId, ucHex, body)));
           if (action === 'execute') {
             const x = await designs.execute(tutorialId, ucHex, body);
             return json(res, 202, await designs.view(tutorialId, ucHex, x.reason));

@@ -23,7 +23,7 @@
 //   shown as stale and needs an explicit acknowledgement that says so.
 
 import { createHash } from 'node:crypto';
-import { readdir, readFile, mkdir, writeFile } from 'node:fs/promises';
+import { lstat, readdir, readFile, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { config, reviewerSetting } from '../config.ts';
 import { assertInstanceLock } from '../instanceLock.ts';
@@ -35,6 +35,7 @@ import {
   canonical,
   evaluateDesign,
   parseTestSteps,
+  recognisedSupersession,
   requirementsFrom,
   sha256,
   type AcItem,
@@ -47,8 +48,8 @@ import {
   type TestItem,
 } from './designCheck.ts';
 import { DESIGN_EDGE_TYPES, DESIGN_LABELS, isLive, readDesignGraph, resolveSlug, type DesignGraph } from './designGraph.ts';
-import { kaneUserFor } from './commands.ts';
-import { jobStdoutPath, type AssuranceJobs, type JobRecord } from './jobs.ts';
+import { buildArgs, CommandError, evolveAcknowledgement, evolveInstruction, kaneUserFor, type EvolveInputs, type EvolveScopePrint } from './commands.ts';
+import { jobStdoutPath, usedEvolve, type AssuranceJobs, type JobRecord } from './jobs.ts';
 import { MAX_REASON, type KaneWriteState } from './review.ts';
 import { requirementFor, verifyPack, type PackVerification } from './runEvidence.ts';
 import { AssuranceError } from './service.ts';
@@ -223,6 +224,8 @@ export async function assembleDesign(input: {
   viewStdout: string;
   workspaceDir: string;
   number: number;
+  /** KaneVerity's own evolve instructions for this use case (their supersessions are recognised). */
+  evolveInstructions?: string[];
 }): Promise<DesignSnapshot> {
   const { ucSnap, ucCid, graph: g, workspaceDir } = input;
   const problems: string[] = [];
@@ -335,6 +338,27 @@ export async function assembleDesign(input: {
     claimed.add(f.path);
   }
   const strayTestFiles = files.filter((f) => !claimed.has(f.path)).map((f) => ({ path: f.path, sha256: f.sha256, id: f.id }));
+  // Every design item of this use case that any record superseded, with Kane's reason. Only a
+  // design record of this use case may supersede them; any other record's supersession (an
+  // execution's exec-supersede, another use case's design) is unrecognised and blocks.
+  const ofThisUc = (seq: number) => {
+    const r = g.records[seq - 1];
+    return r?.designPhase?.ucRoot === ucCid || r?.designGeneration?.ucRoot === ucCid;
+  };
+  const allEdges = g.edges;
+  const ucScenarios = new Set([...g.nodes.values()].filter((n) => n.label === 'scenario' && allEdges.some((e) => e.src === n.cid && e.type === 'belongs_to' && e.dst === ucCid)).map((n) => n.cid));
+  const belongsHere = (cid: string): boolean => {
+    const n = g.nodes.get(cid);
+    if (!n || !DESIGN_LABELS.has(n.label)) return false;
+    if (n.label === 'scenario') return ucScenarios.has(cid);
+    if (n.label === 'test') return allEdges.some((e) => e.src === cid && e.type === 'automates' && ucScenarios.has(e.dst));
+    if (n.label === 'ac') return allEdges.some((e) => e.src === cid && e.type === 'scoped_to' && (e.dst === ucCid || ucScenarios.has(e.dst)));
+    return n.content.uc === ucCid;
+  };
+  const supersessions: NonNullable<DesignSnapshot['supersessions']> = [...g.supersededNodes.entries()]
+    .filter(([cid]) => belongsHere(cid))
+    .map(([cid, x]) => ({ seq: x.seq, label: g.nodes.get(cid)!.label, old: g.slugOf.get(cid) ?? cid, next: x.next ? (g.slugOf.get(x.next) ?? x.next) : null, reason: x.reason, recognised: ofThisUc(x.seq) && recognisedSupersession(x.reason, input.evolveInstructions ?? []) }))
+    .sort((a, b) => a.seq - b.seq || a.old.localeCompare(b.old));
   for (const t of tests) t.recording = t.file ? await recordingTree(workspaceDir, t.file.path) : null;
 
   const gaps: GapItem[] = liveGaps.map((cid) => {
@@ -433,11 +457,78 @@ export async function assembleDesign(input: {
     gaps,
     strayTestFiles,
     supersededTestFiles,
+    supersessions,
     variables: { path: varsRel, sha256: varsBuf ? createHash('sha256').update(varsBuf).digest('hex') : null, appUrlDeclared, appUrlHasValue, files: varFiles, runFile, appUrlWinner: effectiveLocalAppUrl(localTexts) },
     kaneReviews: (ucSnap.kaneReviews ?? [])
       .filter((k) => included.some((x) => x.cid === k.ucCid))
       .map((k) => ({ seq: k.seq, recordHash: k.recordHash, prevHash: k.prevHash, cid: k.ucCid, resolution: k.resolution, by: k.by, reviewOnly: k.reviewOnly, itemsInRecord: k.itemsInRecord, build: k.build })),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Protected paths (B5 evolve): a walk that fails closed
+// ---------------------------------------------------------------------------
+
+/** The filesystem calls the protected walk uses (injectable for tests). */
+export interface WalkIo {
+  lstat(p: string): Promise<{ isFile(): boolean; isDirectory(): boolean; isSymbolicLink(): boolean }>;
+  readdir(p: string): Promise<string[]>;
+  readFile(p: string): Promise<Buffer>;
+}
+const NODE_IO: WalkIo = { lstat: (p) => lstat(p), readdir: (p) => readdir(p), readFile: (p) => readFile(p) };
+
+/**
+ * Every file under root, with its sha256, as "<tag>/<relative path>". No depth limit, symbolic
+ * links (and Windows junctions) are never followed, and nothing is skipped silently: an
+ * unreadable folder or file, a symbolic link, or anything that is neither a file nor a folder is
+ * reported as a problem. A missing root is empty (the folder does not exist yet).
+ */
+export async function walkProtected(root: string, tag: string, io: WalkIo = NODE_IO): Promise<{ files: { path: string; sha256: string }[]; problems: string[] }> {
+  const files: { path: string; sha256: string }[] = [];
+  const problems: string[] = [];
+  const rel = (full: string) => path.relative(root, full).split(path.sep).join('/');
+  const name = (full: string) => (full === root ? `${tag}/` : `${tag}/${rel(full)}`);
+  let st: Awaited<ReturnType<WalkIo['lstat']>>;
+  try {
+    st = await io.lstat(root);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { files, problems };
+    return { files, problems: [`${name(root)} cannot be read (${(err as NodeJS.ErrnoException).code ?? 'error'}).`] };
+  }
+  if (st.isSymbolicLink()) return { files, problems: [`${name(root)} is a symbolic link; it is not followed.`] };
+  if (!st.isDirectory()) return { files, problems: [`${name(root)} is not a folder.`] };
+  const stack = [root];
+  while (stack.length) {
+    const dir = stack.pop()!;
+    let entries: string[];
+    try {
+      entries = (await io.readdir(dir)).sort();
+    } catch (err) {
+      problems.push(`${name(dir)} cannot be read (${(err as NodeJS.ErrnoException).code ?? 'error'}).`);
+      continue;
+    }
+    for (const e of entries) {
+      const full = path.join(dir, e);
+      let es: Awaited<ReturnType<WalkIo['lstat']>>;
+      try {
+        es = await io.lstat(full);
+      } catch (err) {
+        problems.push(`${name(full)} cannot be read (${(err as NodeJS.ErrnoException).code ?? 'error'}).`);
+        continue;
+      }
+      if (es.isSymbolicLink()) problems.push(`${name(full)} is a symbolic link; it is not followed.`);
+      else if (es.isDirectory()) stack.push(full);
+      else if (es.isFile()) {
+        try {
+          files.push({ path: name(full), sha256: createHash('sha256').update(await io.readFile(full)).digest('hex') });
+        } catch (err) {
+          problems.push(`${name(full)} cannot be read (${(err as NodeJS.ErrnoException).code ?? 'error'}).`);
+        }
+      } else problems.push(`${name(full)} is not a regular file or folder.`);
+    }
+  }
+  files.sort((x, y) => x.path.localeCompare(y.path));
+  return { files, problems };
 }
 
 // ---------------------------------------------------------------------------
@@ -596,6 +687,16 @@ export interface ExecutionEntry {
   by: 'kaneverity-design-review';
 }
 
+/** B5: what an evolve changed that it must not have (existing records, requirements, docs, test files). Append-only. */
+export interface EvolveCheckEntry {
+  jobId: string;
+  at: string;
+  jobState: string;
+  /** Checked at start-up, after a restart: changes made after the run may be included. */
+  late: boolean;
+  problems: string[];
+}
+
 interface FullLog {
   tutorialId: string;
   entries: DesignReviewEntry[];
@@ -603,6 +704,7 @@ interface FullLog {
   dryRuns: DryRunEntry[];
   runVariables: RunVariablesEntry[];
   executions: ExecutionEntry[];
+  evolveChecks: EvolveCheckEntry[];
 }
 
 /** Current state of each write (last entry per writeId). */
@@ -753,13 +855,25 @@ export class AssuranceDesigns {
   private writing = new Set<string>();
   private finishing = new Set<string>();
 
+  /** The latest update handling of each job still in progress (see the constructor). */
+  private updating = new Map<string, Promise<unknown>>();
+
   constructor(usecases: AssuranceUseCases, jobs: AssuranceJobs) {
     this.usecases = usecases;
     this.jobs = jobs;
     // Use-case decisions and writes wait while a design-item write or a test run is unresolved.
     usecases.setExternalBusy((t) => this.ownBusy(t));
     jobs.setRunPreflight((j) => this.runPreflight(j));
-    jobs.on('update', (id: string) => void this.onJobUpdate(id));
+    jobs.setEvolveSpawnCheck((j) => this.evolveSpawnCheck(j));
+    // Each job update's handling is tracked (synchronously), so a design read can wait for an
+    // evolve's end-of-run check instead of racing it.
+    jobs.on('update', (id: string) => {
+      const run = this.onJobUpdate(id).catch(() => undefined);
+      this.updating.set(id, run);
+      void run.finally(() => {
+        if (this.updating.get(id) === run) this.updating.delete(id);
+      });
+    });
   }
 
   private async serial<T>(key: string, fn: () => Promise<T>): Promise<T> {
@@ -780,6 +894,10 @@ export class AssuranceDesigns {
 
   /** After a restart: a design-item write that was pending has an unknown outcome. Nothing is retried. */
   async init(): Promise<void> {
+    for (const j of await this.jobs.list().catch(() => [] as JobRecord[])) {
+      if (j.kind !== 'evolve' || j.state === 'queued' || j.state === 'running' || !j.tutorialId) continue;
+      await this.checkEvolve(j, true).catch((err) => console.error(`[orchestrator] the evolve check of ${j.jobId} failed: ${(err as Error).message}`));
+    }
     for (const f of await readdir(dataPath('assurance', 'design-reviews')).catch(() => [] as string[])) {
       const t = f.replace(/\.json$/, '');
       if (!f.endsWith('.json') || !isTutorialId(t)) continue;
@@ -830,7 +948,7 @@ export class AssuranceDesigns {
         break;
       } catch (err) {
         const code = (err as NodeJS.ErrnoException).code ?? '';
-        if (code === 'ENOENT') return { tutorialId: t, entries: [], kaneWrites: [], dryRuns: [], runVariables: [], executions: [] };
+        if (code === 'ENOENT') return { tutorialId: t, entries: [], kaneWrites: [], dryRuns: [], runVariables: [], executions: [], evolveChecks: [] };
         if ((err instanceof SyntaxError || ['EBUSY', 'EPERM', 'EACCES'].includes(code)) && attempt < 10) {
           await new Promise((r) => setTimeout(r, 20 * attempt));
           continue;
@@ -840,9 +958,9 @@ export class AssuranceDesigns {
     }
     const l = parsed as Partial<FullLog> | null;
     if (!l || typeof l !== 'object' || l.tutorialId !== t || !Array.isArray(l.entries)) throw damaged();
-    for (const k of ['kaneWrites', 'dryRuns', 'runVariables', 'executions'] as const) if (l[k] !== undefined && !Array.isArray(l[k])) throw damaged();
+    for (const k of ['kaneWrites', 'dryRuns', 'runVariables', 'executions', 'evolveChecks'] as const) if (l[k] !== undefined && !Array.isArray(l[k])) throw damaged();
     for (const e of l.entries) if (!e || typeof e !== 'object' || typeof e.bindingSha256 !== 'string' || typeof e.kind !== 'string' || typeof e.target !== 'string') throw damaged();
-    return { tutorialId: t, entries: l.entries, kaneWrites: l.kaneWrites ?? [], dryRuns: l.dryRuns ?? [], runVariables: l.runVariables ?? [], executions: l.executions ?? [] };
+    return { tutorialId: t, entries: l.entries, kaneWrites: l.kaneWrites ?? [], dryRuns: l.dryRuns ?? [], runVariables: l.runVariables ?? [], executions: l.executions ?? [], evolveChecks: l.evolveChecks ?? [] };
   }
 
   private guard() {
@@ -854,7 +972,7 @@ export class AssuranceDesigns {
   }
 
   /** Append only: everything stored is kept exactly and the new entry goes last. */
-  private async appendTo<K extends 'entries' | 'kaneWrites' | 'dryRuns' | 'runVariables' | 'executions'>(t: string, key: K, e: FullLog[K][number]) {
+  private async appendTo<K extends 'entries' | 'kaneWrites' | 'dryRuns' | 'runVariables' | 'executions' | 'evolveChecks'>(t: string, key: K, e: FullLog[K][number]) {
     this.guard();
     const l = await this.log(t);
     (l[key] as unknown[]).push(e);
@@ -901,7 +1019,9 @@ export class AssuranceDesigns {
     const graph = await readDesignGraph(path.join(config.assurance.workspaceDir, '.context'), ucSnap.store.tipHash ?? null);
     const files = await this.snapshots(t);
     const n = files.length ? Number(files[files.length - 1].slice(9, 13)) + 1 : 1;
-    const snap = await assembleDesign({ ucSnap, ucCid: cid, graph, listStdout, viewStdout, workspaceDir: config.assurance.workspaceDir, number: n });
+    const evolveInstructions = (await this.jobs.list(t)).flatMap((j) => (j.params.kind === 'evolve' && j.params.ucCid === cid ? [j.params.instruction] : []));
+    const snap = await assembleDesign({ ucSnap, ucCid: cid, graph, listStdout, viewStdout, workspaceDir: config.assurance.workspaceDir, number: n, evolveInstructions });
+    snap.evolveScope = await this.evolveScopeFor(t, cid);
     await mkdir(snapDir(t), { recursive: true });
     await writeFile(path.join(snapDir(t), `snapshot-${pad(n)}.json`), JSON.stringify(snap, null, 2) + '\n', { encoding: 'utf8', flag: 'wx' });
     return snap;
@@ -1033,6 +1153,7 @@ export class AssuranceDesigns {
         gaps: snap.gaps,
         strayTestFiles: snap.strayTestFiles,
         supersededTestFiles: snap.supersededTestFiles ?? [],
+        supersessions: snap.supersessions ?? [],
         variables: snap.variables,
       },
       documented: requirements,
@@ -1306,6 +1427,212 @@ export class AssuranceDesigns {
     return record('verified', `Verified in Kane: record #${r.seq} approves this exact item, recorded as ${r.by}; Kane lists it as trusted.`, found);
   }
 
+  /**
+   * B5: start exactly one `maintain evolve` of this use case (paid: mode "all", the paid
+   * confirmation and the exact acknowledgement). KaneVerity builds the instruction itself, from
+   * the approved requirements and a fresh design read (never from the request). Every gate a
+   * test design has is applied (fresh reads, approved and verified use case, current
+   * requirements, nothing in progress or unknown, a complete design to replace); the result is
+   * judged afterwards by the free B5 design read, like any design.
+   */
+  async evolve(tutorialId: unknown, ucHex: unknown, body: unknown): Promise<JobRecord> {
+    const { t, cid } = this.params(tutorialId, ucHex);
+    const b = (body && typeof body === 'object' ? body : {}) as { confirm?: unknown; acknowledgement?: unknown; instruction?: unknown; because?: unknown };
+    // Only KaneVerity's own instruction is ever passed: a request that brings its own text is refused.
+    if (b.instruction !== undefined || b.because !== undefined) throw new AssuranceError(400, "The evolve instruction is built by KaneVerity from the approved requirements; a request cannot supply one.");
+    const words = evolveAcknowledgement(cid);
+    if (b.acknowledgement !== words) throw new AssuranceError(400, `An evolve needs this exact acknowledgement in "acknowledgement": "${words}"`);
+    // Checked before any Kane read, so a refused request costs nothing.
+    if (config.assurance.mode !== 'all') throw new AssuranceError(403, 'An evolve uses Kane credits, so it needs Assurance mode "all". Nothing was started.');
+    const paidOk = !!b.confirm && typeof b.confirm === 'object' && (b.confirm as { paid?: unknown }).paid === true;
+    if (!paidOk) throw new AssuranceError(400, 'An evolve uses Kane credits. Confirm it explicitly ({"confirm": {"paid": true}}).');
+    return this.serial(`design:${t}`, async () => {
+      // Exactly one evolve per use-case version: another (whatever became of the first) needs a separate decision.
+      const earlier = usedEvolve(await this.jobs.list(t), cid);
+      if (earlier) throw new AssuranceError(409, `Not started: an evolve of this use case was already started (job ${earlier.jobId}, ${earlier.state}). KaneVerity starts one evolve per use-case version; another needs a separate, recorded decision.`);
+      const own = await this.ownBusy(t);
+      if (own) throw new AssuranceError(409, `Not started: ${own}`);
+      // The gates a test design has (fresh use-case read included), for this exact version.
+      const gate = await this.usecases.evolveChecks(t, cid);
+      // A fresh design read, then the instruction from what it shows.
+      const snap = await this.retrieveLocked(t, cid);
+      if (!snap.integrity.ok) throw new AssuranceError(409, `Not started: the design read failed its integrity checks (${snap.integrity.problems.join(' ')}).`);
+      if (!snap.requirements || !gate.fresh.requirements || snap.requirements.reqSha256 !== gate.fresh.requirements.reqSha256) throw new AssuranceError(409, 'Not started: the design read and the use-case read do not name the same requirements.');
+      const bad = (why: string) => new AssuranceError(409, `Not started: ${why}`);
+      const why = { reason: '' };
+      const inputs = await this.evolveInputsFrom(t, cid, snap, gate.ucNow.logicalId, why);
+      if (!inputs) throw bad(why.reason);
+      let instruction: string;
+      try {
+        instruction = evolveInstruction(inputs);
+      } catch (err) {
+        if (err instanceof CommandError) throw bad(err.message);
+        throw err;
+      }
+      this.guard();
+      const scope = await this.scopePrint();
+      if (scope.problems?.length) throw new AssuranceError(409, `Not started: what the evolve must not change cannot be fingerprinted cleanly: ${scope.problems.join(' ')}`);
+      return this.jobs.startEvolve({ tutorialId: t, ucCid: cid, useCase: gate.ucNow.logicalId, reviewer: gate.reviewer, decisionId: gate.decisionId, inputs, instruction, acknowledgement: words, scope, requirements: gate.fresh.requirements, confirm: b.confirm });
+    });
+  }
+
+  /**
+   * The evolve instruction's inputs, from a design read and the requirements it names: three
+   * documented steps with one label each, O1/O3 with one exact value and O2 with none, each
+   * outcome mapped to its own live criterion, O2's criterion text as stored, the live scenarios
+   * and tests to replace. Null (with the reason) when the design does not allow it.
+   */
+  private async evolveInputsFrom(t: string, cid: string, snap: DesignSnapshot, useCase: string, why: { reason: string }): Promise<EvolveInputs | null> {
+    const no = (r: string) => {
+      why.reason = r;
+      return null;
+    };
+    const c = await this.context(t, cid);
+    if (!c || c.snap.snapshot !== snap.snapshot) return no('the design read changed while the evolve was being prepared.');
+    const req = c.requirements;
+    if (req.steps.length !== 3 || req.steps.some((x) => x.labels.length !== 1)) return no('the requirements do not have exactly three documented steps with one label each.');
+    const out = (item: string) => req.outcomes.find((o) => o.item === item);
+    const o1 = out('O1');
+    const o2 = out('O2');
+    const o3 = out('O3');
+    if (req.outcomes.length !== 3 || !o1 || !o2 || !o3 || o1.labels.length !== 1 || o2.labels.length !== 0 || o3.labels.length !== 1) return no('the requirements do not have the three documented outcomes this evolve is written for.');
+    const mapped = (item: string) => c.ev.mapping.entries.find((m) => m.outcome === item);
+    const m1 = mapped('O1');
+    const m2 = mapped('O2');
+    const m3 = mapped('O3');
+    if (!c.ev.mapping.ok || !m1?.acSlug || !m2?.acSlug || !m3?.acSlug) return no(`each documented outcome must map to exactly one live criterion first (${c.ev.mapping.problems.join(' ') || 'no mapping'}).`);
+    const o2Criterion = snap.acs.find((x) => x.cid === m2.acCid);
+    if (!o2Criterion?.text) return no("O2's criterion has no text in the store.");
+    const scenarios = snap.scenarios.map((x) => x.slug).filter((x): x is string => !!x);
+    const tests = snap.tests.map((x) => x.slug).filter((x): x is string => !!x);
+    if (scenarios.length !== snap.scenarios.length || tests.length !== snap.tests.length) return no('a live scenario or test has no short id.');
+    return {
+      useCase,
+      steps: [req.steps[0].labels[0], req.steps[1].labels[0], req.steps[2].labels[0]],
+      o1: { text: o1.text, label: o1.labels[0], criterion: m1.acSlug },
+      o2: { text: o2.text, criterion: m2.acSlug, criterionText: o2Criterion.text },
+      o3: { text: o3.text, label: o3.labels[0], criterion: m3.acSlug },
+      replace: { scenarios, tests },
+    };
+  }
+
+  /**
+   * The last check before Kane is spawned for an evolve (called by the job runner after the design
+   * preflight). Fails closed; never changes the job:
+   * - the job equals its record on disk (parameters and arguments);
+   * - its arguments are exactly what buildArgs makes from its parameters (instruction and
+   *   acknowledgement included);
+   * - the store on disk still ends at the design read's tip with the same records and passes its
+   *   hash chain, the requirements are intact and the same, and the instruction rebuilt from that
+   *   read is the stored one (same use case, same inputs);
+   * - what the evolve must not change was fingerprinted before it started, with no problem.
+   */
+  private async evolveSpawnCheck(j: JobRecord): Promise<string | null> {
+    const p = j.params;
+    if (p.kind !== 'evolve' || !j.tutorialId || j.tutorialId !== p.tutorialId) return 'the job is not an evolve of a tutorial.';
+    const disk = await readJson<JobRecord>(dataPath('assurance', 'jobs', j.jobId, 'job.json'));
+    if (!disk || canonical(disk.params) !== canonical(p) || canonical(disk.args) !== canonical(j.args) || disk.kind !== 'evolve') return 'the job record on disk does not match the job that was queued (its parameters or arguments changed).';
+    let rebuilt: string[];
+    try {
+      rebuilt = buildArgs(p);
+    } catch (err) {
+      return `its arguments are not valid any more (${(err as Error).message})`;
+    }
+    if (canonical(rebuilt) !== canonical(j.args)) return 'its stored arguments are not exactly what its parameters give.';
+    if (p.acknowledgement !== evolveAcknowledgement(p.ucCid)) return 'the acknowledgement is not the exact words for this use-case version.';
+    const snap = await this.latest(p.tutorialId, p.ucCid).catch(() => null);
+    if (!snap || !snap.integrity.ok) return 'there is no integrity-checked design read of this use case.';
+    if (snap.ucSlug !== p.useCase) return `the design read names the use case ${snap.ucSlug ?? 'nothing'}, not ${p.useCase}.`;
+    const storeDir = path.join(config.assurance.workspaceDir, '.context');
+    const graph = await readDesignGraph(storeDir, snap.store.tipHash);
+    if (graph.problems.length || graph.records.length !== snap.store.records) return `the store changed since the design read (${graph.problems[0] ?? `${graph.records.length} records, ${snap.store.records} read`}).`;
+    const req = snap.requirements ? await readVersion(p.tutorialId, snap.requirements.version) : null;
+    if (!req || !req.intact || req.meta.reqSha256 !== snap.requirements!.reqSha256) return 'the requirements the design read names are not intact and the same.';
+    const why = { reason: '' };
+    const inputs = await this.evolveInputsFrom(p.tutorialId, p.ucCid, snap, p.useCase, why);
+    if (!inputs) return why.reason;
+    if (canonical(inputs) !== canonical(p.inputs)) return 'the instruction inputs from a fresh read of the store differ from the stored ones.';
+    let fresh: string;
+    try {
+      fresh = evolveInstruction(inputs);
+    } catch (err) {
+      return (err as Error).message;
+    }
+    if (fresh !== p.instruction) return 'the instruction rebuilt from a fresh read differs from the stored one.';
+    if (!p.scope) return 'what the evolve must not change was not fingerprinted.';
+    if (p.scope.problems?.length) return `what the evolve must not change could not be fingerprinted cleanly (${p.scope.problems[0]}).`;
+    return null;
+  }
+
+  /** Fingerprints of what an evolve may not change: existing store records, requirements (KaneVerity's and the workspace copy), the documentation, existing test files. */
+  private async scopePrint(): Promise<EvolveScopePrint> {
+    const ws = config.assurance.workspaceDir;
+    const problems: string[] = [];
+    const tree = async (root: string, tag: string) => {
+      const r = await walkProtected(root, tag);
+      problems.push(...r.problems);
+      return r.files;
+    };
+    return {
+      commits: await tree(path.join(ws, '.context', 'commits'), 'commits'),
+      blobs: await tree(path.join(ws, '.context', 'blobs'), 'blobs'),
+      requirements: [...(await tree(dataPath('assurance', 'requirements'), 'data/assurance/requirements')), ...(await tree(path.join(ws, 'requirements'), 'workspace/requirements'))],
+      docs: await tree(config.docsContentDir, 'docs'),
+      testFiles: (await walkProtected(path.join(ws, '.testmuai', 'tests'), '.testmuai/tests').then((r) => (problems.push(...r.problems), r.files))).sort((x, y) => x.path.localeCompare(y.path)),
+      problems,
+    };
+  }
+
+  /** After an evolve ends: what it changed that it must not have. Recorded once per job, append-only. */
+  private async checkEvolve(j: JobRecord, late: boolean): Promise<void> {
+    const p = j.params;
+    if (p.kind !== 'evolve' || !j.tutorialId) return;
+    const t = j.tutorialId;
+    await this.serial(`evolve-check:${t}`, async () => {
+      if ((await this.log(t)).evolveChecks.some((c) => c.jobId === j.jobId)) return;
+      const problems: string[] = [];
+      if (!p.scope) problems.push('no fingerprint was taken before it started.');
+      else {
+        const now = await this.scopePrint();
+        const cmp = (label: string, before: { path: string; sha256: string }[], after: { path: string; sha256: string }[], allowNew: boolean) => {
+          const at = new Map(after.map((x) => [x.path, x.sha256]));
+          for (const x of before) {
+            const n = at.get(x.path);
+            if (n === undefined) problems.push(`${label} ${x.path} is gone.`);
+            else if (n !== x.sha256) problems.push(`${label} ${x.path} was changed.`);
+          }
+          if (!allowNew) {
+            const was = new Set(before.map((x) => x.path));
+            for (const x of after) if (!was.has(x.path)) problems.push(`${label} ${x.path} was added.`);
+          }
+        };
+        // New store records, blobs and test files are what a design writes; nothing else may change.
+        for (const x of now.problems ?? []) problems.push(`After the run: ${x}`);
+        if (p.scope.problems?.length) for (const x of p.scope.problems) problems.push(`Before the run: ${x}`);
+        if (!p.scope.blobs) problems.push('the store blobs were not fingerprinted before it started.');
+        cmp('Store record', p.scope.commits, now.commits, true);
+        cmp('Store blob', p.scope.blobs ?? [], now.blobs ?? [], true);
+        cmp('Requirements file', p.scope.requirements, now.requirements, false);
+        cmp('Documentation file', p.scope.docs, now.docs, false);
+        cmp('Test file', p.scope.testFiles, now.testFiles, true);
+      }
+      await this.appendTo(t, 'evolveChecks', { jobId: j.jobId, at: new Date().toISOString(), jobState: j.state, late, problems });
+    });
+  }
+
+  /** The latest evolve of this use case that Kane ran, with its check (null: none). */
+  private async evolveScopeFor(t: string, cid: string): Promise<DesignSnapshot['evolveScope']> {
+    const used = usedEvolve(await this.jobs.list(t), cid);
+    if (!used) return null;
+    // Wait for this process's own end-of-run check if it is still running; if the evolve has ended
+    // and no check was ever recorded (it failed, or the orchestrator stopped first), record one now,
+    // marked late (same lock and once-per-job guard as the start-up recovery).
+    await this.updating.get(used.jobId);
+    if (used.state !== 'queued' && used.state !== 'running' && !(await this.log(t)).evolveChecks.some((x) => x.jobId === used.jobId)) await this.checkEvolve(used, true);
+    const c = (await this.log(t)).evolveChecks.filter((x) => x.jobId === used.jobId).pop();
+    return { jobId: used.jobId, checked: !!c, late: c?.late ?? false, problems: c?.problems ?? [] };
+  }
+
   /** A free dry run of the approved tests' exact files (fresh design read first). */
   async dryRun(tutorialId: unknown, ucHex: unknown): Promise<DryRunEntry> {
     const { t, cid } = this.params(tutorialId, ucHex);
@@ -1453,6 +1780,10 @@ export class AssuranceDesigns {
     try {
       j = await this.jobs.get(id);
     } catch {
+      return;
+    }
+    if (j.kind === 'evolve' && j.state !== 'queued' && j.state !== 'running' && j.tutorialId) {
+      await this.checkEvolve(j, false).catch((err) => console.error(`[orchestrator] the evolve check of ${id} failed: ${(err as Error).message}`));
       return;
     }
     if (j.kind !== 'testrun' || j.state === 'queued' || j.state === 'running' || !j.tutorialId || this.finishing.has(id)) return;

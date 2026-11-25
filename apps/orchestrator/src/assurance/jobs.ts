@@ -23,7 +23,7 @@ import { config } from '../config.ts';
 import { kaneLock, type KaneLock } from '../kane/lock.ts';
 import { addCredits, dataPath, readJson, writeJson, type CostBasis } from '../store.ts';
 import { findLeaks, scrub, scrubDeep } from '../verify/redact.ts';
-import { type RedesignPhase, buildArgs, CommandError, isJobKind, JOB_KINDS, kaneUserFor, parseBalance, parseIngestReceipt, requirementsFileFor, validateAnswers, type JobKind, type JobParams } from './commands.ts';
+import { type EvolveInputs, type EvolveScopePrint, type RedesignPhase, buildArgs, CommandError, isJobKind, JOB_KINDS, kaneUserFor, parseBalance, parseIngestReceipt, requirementsFileFor, validateAnswers, type JobKind, type JobParams } from './commands.ts';
 import { AssuranceError, RequirementsService } from './service.ts';
 import { isTutorialId } from './store.ts';
 import { applyAssuranceLine, emptyAssuranceStream, outcomeOf, type ParsedAssuranceStream, type PendingQuestion } from './stream.ts';
@@ -85,9 +85,19 @@ function newJobId(now = new Date()): string {
   return `j${d}-${t}-${Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0')}`;
 }
 
-/** A test-design job or the resume of a design session (V2). */
+/**
+ * B5: the evolve that uses up this use-case version's one evolve, or null. Every evolve counts,
+ * whatever became of it (complete, paused, failed, crashed, interrupted, unknown), except one
+ * KaneVerity refused before Kane started (state "refused", no exit code: Kane never ran).
+ * Read from the job records on disk, so it survives restarts.
+ */
+export function usedEvolve(jobs: JobRecord[], ucCid: string): JobRecord | null {
+  return jobs.find((j) => j.params.kind === 'evolve' && j.params.ucCid === ucCid && !(j.state === 'refused' && j.exitCode === null)) ?? null;
+}
+
+/** A test-design job, the resume of a design session (V2), or an evolve (B5): never answered or stopped from the generic jobs API. */
 export function isDesignFamily(j: JobRecord): boolean {
-  return j.params.kind === 'design' || (j.params.kind === 'resume' && j.params.verb === 'design');
+  return j.params.kind === 'design' || j.params.kind === 'evolve' || (j.params.kind === 'resume' && j.params.verb === 'design');
 }
 
 const isExpired = (j: JobRecord, now: Date) => j.state === 'paused' && !!j.pause?.expiresAt && Date.parse(j.pause.expiresAt) < now.getTime();
@@ -259,6 +269,31 @@ export class AssuranceJobs extends EventEmitter {
     if (busy) throw new AssuranceError(409, `A job for this tutorial is already ${busy.state}.`);
     const params: JobParams = { kind: 'design', tutorialId: p.tutorialId, ucCid: p.ucCid, useCase: p.useCase, max: p.max, reviewer: p.reviewer, decisionId: p.decisionId, acknowledgedPrevious: p.acknowledgedPrevious, ...(p.redesign ? { redesign: { phase: p.redesign.phase, acknowledgement: p.redesign.acknowledgement } } : {}) };
     return this.enqueue('design', params, p.tutorialId, p.requirements, null);
+  }
+
+  /**
+   * B5: one `maintain evolve` of a use case (paid: Assurance mode "all" and an explicit
+   * confirmation). Called only by the design service after its fresh checks; right before Kane
+   * starts, the design preflight re-checks the use case, the decision and the reviewer.
+   */
+  async startEvolve(p: { tutorialId: string; ucCid: string; useCase: string; reviewer: string; decisionId: string; inputs: EvolveInputs; instruction: string; acknowledgement: string; scope?: EvolveScopePrint; requirements: JobRecord['requirements']; confirm: unknown }): Promise<JobRecord> {
+    this.gate('evolve', p.confirm);
+    if (!isTutorialId(p.tutorialId)) throw new AssuranceError(404, 'Tutorial not found.');
+    const busy = [...this.records.values()].find((j) => j.tutorialId === p.tutorialId && (j.state === 'queued' || j.state === 'running'));
+    if (busy) throw new AssuranceError(409, `A job for this tutorial is already ${busy.state}.`);
+    const params: JobParams = { kind: 'evolve', tutorialId: p.tutorialId, ucCid: p.ucCid, useCase: p.useCase, reviewer: p.reviewer, decisionId: p.decisionId, inputs: p.inputs, instruction: p.instruction, acknowledgement: p.acknowledgement, ...(p.scope ? { scope: p.scope } : {}) };
+    return this.enqueue('evolve', params, p.tutorialId, p.requirements, null);
+  }
+
+  /**
+   * Set by the design service: for an evolve, the last check right before Kane is spawned (after
+   * the design preflight). It compares the job with its record on disk, rebuilds the arguments
+   * from the stored parameters, and rebuilds the instruction from a fresh, integrity-checked
+   * read of the store and requirements. A reason to refuse, or null. It never changes the job.
+   */
+  private evolveSpawnCheck: ((j: JobRecord) => Promise<string | null>) | null = null;
+  setEvolveSpawnCheck(fn: (j: JobRecord) => Promise<string | null>) {
+    this.evolveSpawnCheck = fn;
   }
 
   /** Set by the use-case service: a reason to refuse a design (or design resume) right before Kane starts, or null. */
@@ -508,12 +543,28 @@ export class AssuranceJobs extends EventEmitter {
     }
 
     // V2: a design (or design resume) re-checks KaneVerity's state right before Kane starts.
-    const isDesign = j.params.kind === 'design' || (j.params.kind === 'resume' && j.params.verb === 'design');
+    const isDesign = j.params.kind === 'design' || j.params.kind === 'evolve' || (j.params.kind === 'resume' && j.params.verb === 'design');
     if (isDesign) {
       const refusal = this.designPreflight ? await this.designPreflight(j) : 'the design checks are not available in this process.';
       if (refusal) {
         j.state = 'refused';
         j.reason = scrub(`Not started: ${refusal} Kane's design did not start and no credits were used.`);
+        return;
+      }
+    }
+
+    // B5: an evolve is checked once more right before Kane is spawned; the stored arguments are
+    // never replaced, and a refusal here means no Kane design command started.
+    if (j.params.kind === 'evolve') {
+      let refusal: string | null;
+      try {
+        refusal = this.evolveSpawnCheck ? await this.evolveSpawnCheck(j) : 'the evolve checks are not available in this process.';
+      } catch (err) {
+        refusal = `the evolve checks could not be completed (${(err as Error).message}).`;
+      }
+      if (refusal) {
+        j.state = 'refused';
+        j.reason = scrub(`Not started: ${refusal} No Kane design command started and no credits were used.`);
         return;
       }
     }
@@ -533,7 +584,7 @@ export class AssuranceJobs extends EventEmitter {
 
     // B4: Kane records the review as {kind: "human", id: $USER}; KaneVerity sets it to
     // the self-declared reviewer ("kaneverity:<name>"). It is not proof of identity.
-    const reviewerForKane = j.params.kind === 'review' || j.params.kind === 'design' ? j.params.reviewer : j.params.kind === 'resume' ? j.params.reviewer : undefined;
+    const reviewerForKane = j.params.kind === 'review' || j.params.kind === 'design' || j.params.kind === 'evolve' ? j.params.reviewer : j.params.kind === 'resume' ? j.params.reviewer : undefined;
     const extraEnv: Record<string, string> = reviewerForKane ? { USER: kaneUserFor(reviewerForKane) } : {};
     const r = await this.run(j.args, ws, jobDir(j.jobId, 'private', 'stdout.ndjson'), true, extraEnv);
     await writeFile(jobDir(j.jobId, 'private', 'stderr.log'), r.stderrTail, 'utf8');

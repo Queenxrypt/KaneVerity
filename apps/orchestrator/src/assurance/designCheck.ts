@@ -42,6 +42,28 @@ export interface AcItem extends DesignItemBase {
   expectedAnswer?: { kind: string | null; operator: string | null; operand: string | null; baseline: unknown } | null;
 }
 
+/**
+ * The reasons Kane 0.10.5's design committer records when it supersedes a design item (verified
+ * in its code). With an evolve, its reason ("--because") replaces the generated one, as
+ * "<reason> — evolve by <who> (<tag>)"; only KaneVerity's own evolve instructions are accepted.
+ */
+const SUCCESSOR_TAGS = ['reuse_of successor', 'same-criteria successor', 'title-matched successor', 'paired test successor', 'AC text-matched successor', 'orphaned criterion'];
+const KANE_SUPERSESSION = [
+  /^--force redesign of \S+ by \S+( \((reuse_of|same-criteria|title-matched|paired test) successor\))?$/,
+  /^AC re-emitted with changed content by \S+ \(text-matched successor\)$/,
+  /^orphaned: its scenario \S+ was retired; retired with it by the redesign of \S+ \(\S+\)$/,
+];
+export function recognisedSupersession(reason: string, evolveInstructions: string[]): boolean {
+  if (KANE_SUPERSESSION.some((re) => re.test(reason))) return true;
+  for (const ins of evolveInstructions) {
+    const prefix = `${ins} \u2014 evolve by `;
+    if (!reason.startsWith(prefix)) continue;
+    const m = /^(\S+)(?: \((.+)\))?$/.exec(reason.slice(prefix.length));
+    if (m && (m[2] === undefined || SUCCESSOR_TAGS.includes(m[2]))) return true;
+  }
+  return false;
+}
+
 /** Check kinds that compare with a captured starting state (Kane: they need a baseline-capture step). */
 export const CHANGE_KINDS = ['delta', 'state-transition'];
 
@@ -142,6 +164,10 @@ export interface DesignSnapshot {
    * needs an explicit, recorded cleanup decision (not part of B5).
    */
   supersededTestFiles?: { path: string; sha256: string; id: string; testCid: string; supersededInSeq: number; successor: string | null }[];
+  /** The latest evolve of this use case: what it changed that it must not have (null: none started). */
+  evolveScope?: { jobId: string; checked: boolean; late: boolean; problems: string[] } | null;
+  /** Every design item a design record of this use case superseded, with Kane's recorded reason. */
+  supersessions?: { seq: number; label: string; old: string; next: string | null; reason: string; recognised: boolean }[];
   /** Kane's generated variables file, read only; KaneVerity never writes it. */
   variables: {
     path: string;
@@ -347,6 +373,8 @@ function generationCheck(s: DesignSnapshot): DesignEvaluation['generation'] {
   const inLatest = s.designRecords.filter((r) => r.generation === latest);
   const phases = [...new Set(inLatest.map((r) => r.phase).filter((p): p is string => !!p))];
   for (const r of s.designRecords) if (!r.hash) problems.push(`The full hash of design record ${r.seq} is not established.`);
+  // Fail closed on a supersession KaneVerity cannot explain (not one of Kane's own recorded reasons).
+  for (const x of s.supersessions ?? []) if (!x.recognised) problems.push(`Record #${x.seq} superseded ${x.label} ${x.old}${x.next ? ` with ${x.next}` : ''} for a reason KaneVerity does not recognise ("${x.reason.slice(0, 160)}"), so the design cannot be accepted.`);
   const tests = inLatest.filter((r) => r.phase === 'tests');
   if (!tests.length) problems.push(`Design generation ${latest} has no tests phase: the design is incomplete.`);
   else if (!tests.some((r) => r.completeness === 'complete')) problems.push(`The tests phase of design generation ${latest} is not complete.`);
@@ -529,7 +557,11 @@ function filesCheck(s: DesignSnapshot): Check {
     }
   }
   for (const f of s.strayTestFiles) problems.push(`${f.path} belongs to no live test of this use case (${f.id ?? 'no id'}); a run could pick it up.`);
+  const ev = s.evolveScope;
+  if (ev && !ev.checked) problems.push(`What evolve job ${ev.jobId} changed has not been checked yet, so the design cannot be accepted.`);
+  if (ev) for (const p of ev.problems) problems.push(`Evolve job ${ev.jobId}: ${p}`);
   const notes = (s.supersededTestFiles ?? []).map((f) => `${f.path} is the file of ${f.id}, superseded in record #${f.supersededInSeq}${f.successor ? ` by ${f.successor}` : ''}. Kane keeps it on disk; it is never run, and it is fingerprinted so any change blocks a run. Deleting it needs an explicit, recorded cleanup decision.`);
+  if (ev?.late) notes.push(`Evolve job ${ev.jobId} was checked only after an orchestrator restart, so later changes may be included in that check.`);
   return { ok: problems.length === 0, problems, notes };
 }
 

@@ -1012,3 +1012,133 @@ here were replaced and won't run any more"). B5 now distinguishes:
 re-sent criterion with new text refused as a duplicate, a mis-pinned copy refused as stray),
 `assurance-design-execution.test.ts` (a kept file is never run, never blocks, and any change to
 it blocks).
+
+### 13.11 The first redesign, and one `maintain evolve` (built 2026-11-25; the evolve not run)
+
+**The first redesign (run 2026-11-25, approved):** job `j20261125-204721-93a7a7`,
+`design tests --use-case uc-1 --mode agent --max 3 --force --phase acs`, complete, exit 0,
+**17.93 credits** (reported and measured). Kane re-sent the three criteria unchanged (no record),
+superseded sc-1 with sc-2 (same title and intent, "reuse_of successor", record #8), wired sc-2 to
+all three criteria (#9), and kept t-1 (no tests record: "t-1 already automates that live
+scenario"). B5 refuses the result: generation 2 has no tests phase, one combined scenario and
+test, and ac-1 is still `presence`. Records #1–#7 and the requirements are unchanged.
+
+**What Kane 0.10.5 allows next (verified in its code; [doc] = its help):**
+
+- Generation 2 cannot be continued: entering at a phase needs every earlier phase but grounding
+  in the latest generation, and it has no criteria record (`PHASE_ORDER`, final in agent mode).
+  The session completed and is not resumable (`context sessions list`: "No sessions"); only a
+  resumed session continues a generation, so any new design starts generation 3.
+- `design tests` takes no instructions before it designs; `--message` works only on a paused
+  session.
+- `maintain evolve <ref> --because <reason> --mode agent --answer evolve:<use case>=1` [doc]
+  re-designs a use case. When it names the use case (or an item), Kane adds this to the agent's
+  opening message: "[kane] evolve started on use-case uc-1 (…). Because: <reason>. Judge the
+  scope yourself: change what this genuinely affects and leave the rest as designed. If it is
+  ambiguous what should change, ask before changing anything." The opening message is capped at
+  8 KiB (too large: "nothing was started"). The reason also replaces the generated supersession
+  reason: "<reason> — evolve by <who> (<tag>)".
+
+**KaneVerity's evolve (one documented command; no new bypass flag):**
+
+- `POST /api/assurance/designs/:tutorialId/:ucHex/evolve` with
+  `{"confirm": {"paid": true}, "acknowledgement": "<exact text>"}`; a request that brings its own
+  `instruction` or `because` is refused. Mode `all` and the paid confirmation are checked before
+  any read.
+- **One evolve per use-case version:** once Kane ran an evolve of this version (complete, paused,
+  failed, crashed, interrupted or unknown), another evolve, a forced redesign and a plain test
+  design of this version are all refused before any Kane command; it needs a separate, recorded
+  decision. The rule is read from the job records on disk, so it survives restarts; the generic
+  jobs API never starts an evolve. Only a request KaneVerity refused before Kane started (state
+  `refused` with no exit code) does not use it up; the design before it is then what is evolved.
+- The acknowledgement is bound to the use-case version: "I approve one evolve of use case
+  <first 12 hex of its content id> with KaneVerity's instruction: Kane re-designs it in a new
+  generation, supersedes what it replaces, and no record is deleted."
+- Gates: everything a test design has (no write in progress or unknown, a complete design to
+  replace and nothing in progress, paused or unknown, a fresh use-case read, approved and
+  verified, current requirements, the same logical id), plus a fresh design read that passes
+  integrity, the requirements of both reads being the same, three documented steps with one
+  label each, O1/O3 with one exact value and O2 with none, and each outcome mapped to its own
+  live criterion. Nothing else runs while it runs; decisions wait.
+- The instruction is two sentences (Kane asks for "a sentence or two"), built only from
+  requirements v1 (exact values, step labels) and the design read (the mapped criteria's short
+  ids, O2's criterion text exactly as stored, the live scenario and test to replace). Inputs with
+  control characters or double quotes, or over 200 characters, are refused; the instruction is
+  capped at 1,200 bytes (Kane's opening-message limit is 8 KiB, and the whole message with it is
+  under a quarter of that, measured with Kane's own size function). For the real store
+  (2026-11-25):
+
+  > Design exactly three scenario/test pairs for uc-1, one per documented outcome, each scenario
+  > exercising one criterion and each test verifying only that criterion with one matching
+  > structured check: O1 keeps ac-3 (presence of 'API key generated successfully.'); O2 re-sends
+  > ac-1 with exactly the text "After generating the key, the new key appears in the API keys
+  > list." as a delta criterion whose test captures baseline: the full API keys list before
+  > 'Generate Key', then asserts every baseline key is still listed and at least one new key
+  > appears; O3 keeps ac-2 (absolute, equals '2 keys'). Use only the documented steps 'Developer
+  > Settings', 'API Keys', 'Generate Key' in that order, add no other UI elements or steps, and
+  > replace sc-2 and t-1 without reusing them.
+- The command: `maintain evolve <use case> --because <instruction> --mode agent --answer
+  evolve:<use case>=1` (Kane's documented confirmation, 1 = go ahead). `FORBIDDEN_FLAGS` is
+  unchanged; evolve passes none of them.
+- **When the arguments are checked (the actual sequence):**
+  1. The endpoint's gates, the fresh reads and the fingerprints (above); the request is refused if
+     any protected path cannot be fingerprinted cleanly.
+  2. **At enqueue:** `buildArgs` builds the arguments from the job's parameters and refuses
+     anything but KaneVerity's own instruction (rebuilt from its inputs) and the exact
+     acknowledgement; the job is stored with those arguments.
+  3. In the job runner: the Kane version check, then the design preflight (decision, reviewer,
+     eligibility, Kane's id).
+  4. **Right before Kane is spawned (after the design preflight):** the job must equal its record
+     on disk (parameters and arguments); `buildArgs` run again on the stored parameters must give
+     exactly the stored arguments; the acknowledgement must be the exact words; the store on disk
+     must still end at the design read's tip with the same records and an intact hash chain; the
+     requirements must be intact and the same; the inputs and instruction rebuilt from that read
+     must be the stored ones; and the fingerprints must have been taken without problems. The
+     stored arguments are never replaced. A refusal here is recorded as "Not started: … No Kane
+     design command started and no credits were used" (state `refused`, no exit code), so it
+     does not use up the one evolve.
+  5. Kane is spawned with exactly the stored arguments.
+- Outcome: the job is `complete` only with exit 0 **and** Kane's final `done` event with status
+  `complete` (the evolve stream has not been seen in a real run: anything else is an unknown
+  outcome). Credits are recorded from Kane's report and the balance difference.
+- A pause is never answered, resumed or stopped by KaneVerity (use-case answer and cancel, and
+  the generic jobs API, refuse it); a failed, crashed, refused or interrupted evolve blocks any
+  further redesign or evolve until a separate, recorded decision. Nothing is retried.
+- **What it must not change:** before it starts, KaneVerity fingerprints (sha256) every file under
+  the store's `commits` and `blobs`, the requirements (its own and the workspace copy), the
+  documentation and `.testmuai/tests`. The walk has no depth limit, never follows a symbolic link
+  or junction, and skips nothing: an unreadable file or folder, a link, or an entry that is neither
+  a file nor a folder is a problem, and an evolve with any problem is never started. When the
+  evolve ends, the same walk is compared and the result is recorded once per job in the design
+  history (`evolveChecks`, append-only, under a per-tutorial lock). New records, blobs and test
+  files are what a design writes; any existing record, blob or test file changed or removed (the
+  superseded t-1 file must be kept), any requirements or documentation file changed, added or
+  removed, and any problem from either walk, blocks the design (files check).
+- **Late checks:** if the orchestrator stopped before the check was recorded, it is recorded at
+  start-up, marked late; if a design read finds an ended evolve with no recorded check (after
+  waiting for this process's own end-of-run check), it records it there, also marked late. A late
+  check compares with the files as they are then, so later legitimate changes are included and
+  would block too (shown as a note).
+
+**B5 fails closed on what an evolve commits (and on any design):** duplicate or extra live
+criteria (structure, mapping), combined scenarios (structure, outcomes), mismatched checks
+(criterion and check kinds), incomplete phases (generation), stray test files (files), and now
+**unrecognised supersessions**: every design item of this use case that any record superseded
+must have been superseded by a design record of this use case (an execution's exec-supersede, for
+example, is not recognised), with a reason Kane's committer writes (`--force redesign …`, `AC re-emitted with changed
+content … (text-matched successor)`, `orphaned: …`) or `<one of KaneVerity's own evolve
+instructions> — evolve by <who> (<Kane's tag>)`. The real generation 2's reason
+(`--force redesign of uc-1 by design-agent (reuse_of successor)`) is recognised.
+
+**Tests:** `assurance-evolve.test.ts` (fake Kane, dynamic store starting from the real state):
+the instruction and its refusals; the gates and costs-nothing refusals; a successful evolve
+(exact arguments, credits, B5 accepting three pairs with ac-1's delta successor and t-1's file
+kept as superseded); an ignored instruction, an incomplete run, a duplicate criterion, O2 left as
+presence, an unrecognised supersession and a stray file all refused; pauses never answered;
+failed, crashed and interrupted evolves never retried; decisions locked while it runs; the
+run-time preflight and a tampered instruction refused; the opening message measured with Kane's
+installed size function; the one-evolve rule after a restart and against a forced redesign, a
+plain design and the generic jobs API, and not used up by a request refused before Kane started;
+records, requirements, documentation and existing test files changed or removed by an evolve all
+blocked, and a late check after a restart; tampering between enqueue and execution (instruction, acknowledgement, arguments, the store) refused before Kane is spawned; changed or deleted store blobs; the protected walk with deep nesting, unreadable entries, symbolic links (a real junction) and unexpected entries; a late check found by a design read, recorded once; no duplicate checks across reads and start-up. `assurance-design-check.test.ts`: which supersession
+reasons are recognised.

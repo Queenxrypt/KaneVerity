@@ -261,6 +261,27 @@ if (!reply) {
 
 // Optionally land a file in the working directory, as `context ingest` would create its store.
 if (reply.createStore) fs.mkdirSync(path.join(process.cwd(), '.context'), { recursive: true });
+// What a design (or an evolve) commits: whole records appended to the store with a correct
+// hash chain (fake-hashes.json), and files written in the workspace (generated test files).
+if (Array.isArray(reply.appendCommits) && reply.appendCommits.length) {
+  const crypto = require('node:crypto');
+  const ctx = path.join(process.cwd(), '.context');
+  const hashes = JSON.parse(fs.readFileSync(path.join(ctx, 'fake-hashes.json'), 'utf8'));
+  for (const rec of reply.appendCommits) {
+    const seq = fs.readdirSync(path.join(ctx, 'commits')).length + 1;
+    const body = JSON.stringify({ seq, prev_hash: hashes[String(seq - 1)], ts: new Date().toISOString(), proposal_id: null, nodes: [], edges: [], review: [], supersessions: [], source_head_moves: {}, schema_version: 'assurance/context@1', parents: [hashes[String(seq - 1)]], ...rec });
+    const hex = crypto.createHash('sha256').update(body).digest('hex');
+    fs.writeFileSync(path.join(ctx, 'commits', `${String(seq).padStart(6, '0')}-${hex.slice(0, 12)}.json`), body);
+    hashes[String(seq)] = `sha256:${hex}`;
+  }
+  fs.writeFileSync(path.join(ctx, 'fake-hashes.json'), JSON.stringify(hashes));
+}
+for (const [rel, text] of Object.entries(reply.writeFiles || {})) {
+  fs.mkdirSync(path.dirname(path.join(process.cwd(), rel)), { recursive: true });
+  fs.writeFileSync(path.join(process.cwd(), rel), text);
+}
+// Files the command removes (e.g. an evolve that deletes a kept test file it should not touch).
+for (const rel of reply.deleteFiles || []) fs.rmSync(path.join(process.cwd(), rel), { force: true });
 
 function finish() {
   for (const line of reply.stdout || []) process.stdout.write((typeof line === 'string' ? line : JSON.stringify(line)) + '\n');

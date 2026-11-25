@@ -515,7 +515,7 @@ function DesignReviewCard({ tutorialId, ucCid, ucSlug }: { tutorialId: string; u
             {!ev.files.ok && <p className="text-xs text-fail">{ev.files.problems.join(' ')}</p>}
             {ev.files.notes.length > 0 && (
               <p className="text-xs text-slate-600" data-testid="design-superseded-files">
-                Superseded test files kept on disk (never run): {ev.files.notes.join(' ')}
+                Notes on the test files: {ev.files.notes.join(' ')}
               </p>
             )}
           </section>

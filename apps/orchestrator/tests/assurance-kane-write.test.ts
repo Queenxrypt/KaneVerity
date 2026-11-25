@@ -517,7 +517,7 @@ test('with Assurance switched off, an approval is recorded but not written; it c
 });
 
 test('bypass flags are never passed to Kane, and the review job cannot be started from the jobs API', async () => {
-  const { buildArgs, FORBIDDEN_FLAGS, JOB_KINDS } = await import('../src/assurance/commands.ts');
+  const { buildArgs, evolveAcknowledgement, evolveInstruction, FORBIDDEN_FLAGS, JOB_KINDS } = await import('../src/assurance/commands.ts');
   assert.deepEqual([...FORBIDDEN_FLAGS], FORBIDDEN);
   // Every Kane invocation in this file.
   for (const c of await calls()) for (const f of FORBIDDEN) assert.ok(!c.argv.includes(f), `${f} in ${c.argv.join(' ')}`);
@@ -534,6 +534,11 @@ test('bypass flags are never passed to Kane, and the review job cannot be starte
     { kind: 'review', tutorialId: T, writeId: 'w20261122-120000-abcdef', ucCid: UC, reviewer: REVIEWER },
     { kind: 'dryrun', tutorialId: T, files: ['.testmuai/tests/a_test.md'] },
     { kind: 'testrun', tutorialId: T, ucCid: UC, files: ['.testmuai/tests/a_test.md'], reviewer: REVIEWER, readinessSha256: 'a'.repeat(64) },
+    (() => {
+      // B5 evolve: KaneVerity's own instruction (rebuilt from its inputs) and the exact acknowledgement.
+      const inputs = { useCase: 'uc-1', steps: ['Developer Settings', 'API Keys', 'Generate Key'] as [string, string, string], o1: { text: 'O1 text', label: 'API key generated successfully.', criterion: 'ac-3' }, o2: { text: 'O2 text', criterion: 'ac-1', criterionText: 'After generating the key, the new key appears in the API keys list.' }, o3: { text: 'O3 text', label: '2 keys', criterion: 'ac-2' }, replace: { scenarios: ['sc-2'], tests: ['t-1'] } };
+      return { kind: 'evolve', tutorialId: T, ucCid: UC, useCase: 'uc-1', reviewer: REVIEWER, decisionId: 'd20261124-000000-aaaaaa', inputs, instruction: evolveInstruction(inputs), acknowledgement: evolveAcknowledgement(UC) };
+    })(),
   ];
   assert.deepEqual(samples.map((s) => s.kind).sort(), Object.keys(JOB_KINDS).sort(), 'every kind is checked');
   for (const s of samples) {

@@ -309,3 +309,134 @@ export function goodMembers(defs: { message: string; list: string; count: string
     },
   ];
 }
+
+// ---------------------------------------------------------------------------
+// The real state after the first paid redesign (records #8-#9, 2026-11-25), and the evolve that
+// should follow it (generation 3). Test-only.
+// ---------------------------------------------------------------------------
+
+export interface RealGen2Ids {
+  sc2: string;
+}
+
+/**
+ * Generation 2 as Kane 0.10.5 actually wrote it for uc-1: sc-1 superseded by sc-2 (same title and
+ * intent, "reuse_of successor"), t-1's automates link re-blessed onto sc-2, sc-2 wired to all three
+ * criteria, no criteria record (re-sent unchanged) and no tests record (t-1 kept).
+ */
+export function generation2Real(uc: string, g1: DesignIds): { records: Record<string, unknown>[]; ids: RealGen2Ids } {
+  const scC = { title: 'Generate an API key through documented navigation', intent: 'Follow the documented steps.', case_type: 'happy', derived: true, technique_notes: 'One documented journey (redesign).' };
+  const sc2 = cidOf('scenario', scC);
+  const phase = (p: string) => ({ design_phase: { uc_root: uc, generation: 2, phase: p, completeness: 'complete', payload_digest: 'sha256:' + '2'.repeat(64) }, intent_verb: 'design', created_by: { build: '0.10.5', by } });
+  const e = (type: string, src: string, dst: string) => ({ ecid: `sha256:${sha(type + src + dst)}`, type, src, dst, props: {} });
+  return {
+    ids: { sc2 },
+    records: [
+      {
+        ...phase('scenarios'),
+        design_generation: { uc_root: uc, uc_cid: uc, generation: 2, supersedes_generation: 1, because: 'forced redesign (--force)', by },
+        nodes: [{ cid: sc2, label: 'scenario', content: scC }],
+        edges: [e('belongs_to', sc2, uc), e('automates', g1.t1, sc2)],
+        supersessions: [
+          { kind: 'node', old: g1.sc1, new: sc2, reason: '--force redesign of uc-1 by design-agent (reuse_of successor)', by },
+          { kind: 'edge', ecid: `sha256:${sha('automates' + g1.t1 + g1.sc1)}`, reason: `re-blessed onto ${sc2} (redirect successor of ${g1.sc1}) by design-agent`, by },
+        ],
+        names: [{ cid: sc2, slug: 'sc-2', by }],
+      },
+      { ...phase('wiring'), nodes: [], edges: [e('exercises', sc2, g1.ac1), e('exercises', sc2, g1.ac2), e('exercises', sc2, g1.ac3)] },
+    ],
+  };
+}
+
+export interface Gen3Options {
+  /** The agent ignored the instruction: one combined scenario and one test again. */
+  ignored?: boolean;
+  /** The run stopped before its tests phase. */
+  incomplete?: boolean;
+  /** O2's criterion re-sent with other text: no text match, so ac-1 stays live next to it. */
+  acText?: string;
+  /** O2's criterion re-sent unchanged (still presence): the delta test then contradicts it. */
+  keepPresence?: boolean;
+  /** A supersession with a reason Kane does not write. */
+  strangeReason?: boolean;
+}
+
+/** The evolve of uc-1 that follows KaneVerity's instruction (generation 3), or one of its failure shapes. */
+export function generation3(uc: string, g1: DesignIds, g2: RealGen2Ids, instruction: string, opts: Gen3Options = {}) {
+  const why = (tag?: string) => `${instruction} — evolve by design-agent${tag ? ` (${tag})` : ''}`;
+  const phase = (p: string) => ({ design_phase: { uc_root: uc, generation: 3, phase: p, completeness: 'complete', payload_digest: 'sha256:' + '3'.repeat(64) }, intent_verb: 'design', created_by: { build: '0.10.5', by } });
+  const e = (type: string, src: string, dst: string) => ({ ecid: `sha256:${sha(type + src + dst)}`, type, src, dst, props: {} });
+  const start = { design_generation: { uc_root: uc, uc_cid: uc, generation: 3, supersedes_generation: 2, because: instruction, by } };
+  const newAc = opts.keepPresence ? null : opts.acText ? { ...AC_LIST_DELTA, text: opts.acText } : AC_LIST_DELTA;
+  const ac4 = newAc ? cidOf('ac', newAc) : null;
+  const listAc = ac4 ?? g1.ac1;
+  const listSlug = ac4 ? 'ac-4' : 'ac-1';
+  const scen = (title: string) => ({ title, intent: 'One documented outcome.', case_type: 'happy', derived: true });
+  const records: Record<string, unknown>[] = [];
+  records.push({
+    ...phase('acs'),
+    ...start,
+    nodes: ac4 ? [{ cid: ac4, label: 'ac', content: newAc }] : [],
+    edges: ac4 ? [e('scoped_to', ac4, uc)] : [],
+    supersessions: ac4 && newAc!.text === AC_TEXT.list ? [{ kind: 'node', old: g1.ac1, new: ac4, reason: opts.strangeReason ? 'cleaned up by hand' : why('AC text-matched successor'), by }] : [],
+    names: ac4 ? [{ cid: ac4, slug: 'ac-4', by }] : [],
+  });
+  if (opts.ignored) {
+    // One scenario for all three outcomes again, and one combined test with a presence check.
+    const s3 = scen('Generate an API key and see all three outcomes');
+    const sc3 = cidOf('scenario', s3);
+    const t = test('Generate an API key and check every outcome', T1_BODY.replace('@verifies ac-1, ac-2, ac-3', `@verifies ${listSlug}, ac-2, ac-3`), { kind: 'presence', operator: 'exists', operand: 'the newly generated key in the API keys list', baseline: null, verified_against: listSlug, expected_mode: 'authored' }, 'objectives:\n  - objective: a\n    step: 1\n');
+    const t2 = cidOf('test', t.content);
+    records.push({ ...phase('scenarios'), nodes: [{ cid: sc3, label: 'scenario', content: s3 }], edges: [e('belongs_to', sc3, uc)], supersessions: [{ kind: 'node', old: g2.sc2, new: sc3, reason: why('title-matched successor'), by }], names: [{ cid: sc3, slug: 'sc-3', by }] });
+    records.push({ ...phase('wiring'), nodes: [], edges: [e('exercises', sc3, listAc), e('exercises', sc3, g1.ac2), e('exercises', sc3, g1.ac3)] });
+    records.push({ ...phase('tests'), nodes: [{ cid: t2, label: 'test', content: t.content }], edges: [e('automates', t2, sc3), e('verifies', t2, listAc), e('verifies', t2, g1.ac2), e('verifies', t2, g1.ac3)], supersessions: [{ kind: 'node', old: g1.t1, new: t2, reason: why('paired test successor'), by }], names: [{ cid: t2, slug: 't-2', by }] });
+    return { records, ids: { ac4, listAc, sc: [sc3], tests: [{ slug: 't-2', name: 'generate-an-api-key-and-check-every-outcome', definitionId: t.definitionId, body: t.content.test_md_blob as string }] } };
+  }
+  const s3 = scen('Success message after generating a key');
+  const s4 = scen('New key added to the list, earlier keys kept');
+  const s5 = scen('Key count after generating a key');
+  const sc3 = cidOf('scenario', s3);
+  const sc4 = cidOf('scenario', s4);
+  const sc5 = cidOf('scenario', s5);
+  records.push({
+    ...phase('scenarios'),
+    nodes: [{ cid: sc3, label: 'scenario', content: s3 }, { cid: sc4, label: 'scenario', content: s4 }, { cid: sc5, label: 'scenario', content: s5 }],
+    edges: [e('belongs_to', sc3, uc), e('belongs_to', sc4, uc), e('belongs_to', sc5, uc)],
+    supersessions: [{ kind: 'node', old: g2.sc2, new: null, reason: why(), by }],
+    names: [{ cid: sc3, slug: 'sc-3', by }, { cid: sc4, slug: 'sc-4', by }, { cid: sc5, slug: 'sc-5', by }],
+  });
+  records.push({ ...phase('wiring'), nodes: [], edges: [e('exercises', sc3, g1.ac3), e('exercises', sc4, listAc), e('exercises', sc5, g1.ac2)] });
+  const bodies = { ...GEN2_BODIES, list: GEN2_BODIES.list.replace('@verifies ac-4', `@verifies ${listSlug}`) };
+  const tm = test('Check the success message', bodies.message, { kind: 'presence', operator: 'exists', operand: 'API key generated successfully.', baseline: null, verified_against: 'ac-3', expected_mode: 'authored' }, 'objectives:\n  - objective: a\n    step: 1\n');
+  const tl = test('Check the new key in the list', bodies.list, { kind: 'delta', operator: 'changed-by', operand: '1', baseline: 'the full API keys list', verified_against: listSlug, expected_mode: 'authored' }, 'objectives:\n  - objective: a\n    step: 1\n  - objective: capture\n    step: 3\n    baseline: true\n');
+  const tc = test('Check the key count', bodies.count, { kind: 'absolute', operator: 'equals', operand: '2 keys', baseline: null, verified_against: 'ac-2', expected_mode: 'authored' }, 'objectives:\n  - objective: a\n    step: 1\n');
+  const [t2, t3, t4] = [tm, tl, tc].map((x) => cidOf('test', x.content));
+  if (!opts.incomplete)
+    records.push({
+      ...phase('tests'),
+      nodes: [{ cid: t2, label: 'test', content: tm.content }, { cid: t3, label: 'test', content: tl.content }, { cid: t4, label: 'test', content: tc.content }],
+      edges: [e('automates', t2, sc3), e('verifies', t2, g1.ac3), e('automates', t3, sc4), e('verifies', t3, listAc), e('automates', t4, sc5), e('verifies', t4, g1.ac2)],
+      supersessions: [{ kind: 'node', old: g1.t1, new: null, reason: why(), by }],
+      names: [{ cid: t2, slug: 't-2', by }, { cid: t3, slug: 't-3', by }, { cid: t4, slug: 't-4', by }],
+    });
+  return {
+    records,
+    ids: {
+      ac4,
+      listAc,
+      sc: [sc3, sc4, sc5],
+      tests: opts.incomplete
+        ? []
+        : [
+            { slug: 't-2', name: 'check-the-success-message', definitionId: tm.definitionId, body: bodies.message },
+            { slug: 't-3', name: 'check-the-new-key-in-the-list', definitionId: tl.definitionId, body: bodies.list },
+            { slug: 't-4', name: 'check-the-key-count', definitionId: tc.definitionId, body: bodies.count },
+          ],
+    },
+  };
+}
+
+/** A generated test file as Kane writes it, as a workspace-relative path and text (for the fake's writeFiles). */
+export function testFileText(slug: string, definitionId: string, body: string): string {
+  return `---\nassurance:\n  id: ${slug}\n  base: ${definitionId}\n---\n${body}`;
+}

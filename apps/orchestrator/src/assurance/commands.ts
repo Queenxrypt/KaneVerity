@@ -7,7 +7,7 @@
 
 import type { PendingQuestion } from './stream.ts';
 
-export type JobKind = 'ingest' | 'extract' | 'design' | 'resume' | 'list' | 'cover' | 'view' | 'fsck' | 'review' | 'dryrun' | 'testrun';
+export type JobKind = 'ingest' | 'extract' | 'design' | 'resume' | 'list' | 'cover' | 'view' | 'fsck' | 'review' | 'dryrun' | 'testrun' | 'evolve';
 
 export interface JobKindInfo {
   kind: JobKind;
@@ -29,6 +29,10 @@ export const JOB_KINDS: Record<JobKind, JobKindInfo> = {
   extract: { kind: 'extract', label: 'Extract use cases', paid: true, writesStore: true, output: 'ndjson' },
   // V2 safety: started only through the use-case design endpoint, after fresh checks (usecases.ts).
   design: { kind: 'design', label: 'Design tests for a use case', paid: true, writesStore: true, output: 'ndjson', internal: true },
+  // B5: one documented `maintain evolve` of an approved use case, with KaneVerity's own reason
+  // (built from the approved requirements and the store, never user text). Paid; started only
+  // from the design service after its fresh checks; never stopped from the jobs API.
+  evolve: { kind: 'evolve', label: 'Re-design a use case (evolve)', paid: true, writesStore: true, output: 'ndjson', internal: true, cancellable: false },
   resume: { kind: 'resume', label: 'Answer and resume', paid: true, writesStore: true, output: 'ndjson' },
   list: { kind: 'list', label: 'List the store', paid: false, writesStore: false, output: 'json' },
   cover: { kind: 'cover', label: 'Read coverage', paid: false, writesStore: false, output: 'ndjson' },
@@ -61,6 +65,77 @@ export const FORBIDDEN_FLAGS = ['--allow-unreviewed', '--allow-archive', '--forc
 export const REDESIGN_PHASES = ['acs', 'scenarios'] as const;
 export type RedesignPhase = (typeof REDESIGN_PHASES)[number];
 export const isRedesignPhase = (v: unknown): v is RedesignPhase => typeof v === 'string' && (REDESIGN_PHASES as readonly string[]).includes(v);
+
+/**
+ * What KaneVerity's evolve instruction is built from: the approved requirements (outcome texts,
+ * exact labels, step labels) and the store (the short ids of the criteria mapped to each
+ * outcome, the O2 criterion's exact text, the live scenario and test to replace). Never user text.
+ */
+export interface EvolveInputs {
+  useCase: string;
+  steps: [string, string, string];
+  o1: { text: string; label: string; criterion: string };
+  o2: { text: string; criterion: string; criterionText: string };
+  o3: { text: string; label: string; criterion: string };
+  replace: { scenarios: string[]; tests: string[] };
+}
+const DESIGN_SLUG = /^[a-z]+-[0-9]+$/;
+const SAFE_TEXT = /^[^\u0000-\u001f\u007f"]{1,200}$/;
+/**
+ * Kane 0.10.5 caps the agent's opening message at 8 KiB, measured as a JSON envelope of
+ * "[kane] evolve started on …", "Because: <reason>" and its own two-line guidance; KaneVerity's
+ * own cap is far below that (tested against Kane's installed size function).
+ */
+export const MAX_EVOLVE_INSTRUCTION_BYTES = 1200;
+
+function checkEvolveInputs(i: EvolveInputs): void {
+  const bad = (what: string) => new CommandError(`Invalid evolve instruction input: ${what}.`);
+  if (!LOGICAL_ID.test(i.useCase)) throw bad('use case');
+  if (!Array.isArray(i.steps) || i.steps.length !== 3 || !i.steps.every((x) => SAFE_TEXT.test(x))) throw bad('steps');
+  for (const [k, o] of [['O1', i.o1], ['O3', i.o3]] as const) if (!SAFE_TEXT.test(o.text) || !SAFE_TEXT.test(o.label) || !DESIGN_SLUG.test(o.criterion)) throw bad(k);
+  if (!SAFE_TEXT.test(i.o2.text) || !SAFE_TEXT.test(i.o2.criterionText) || !DESIGN_SLUG.test(i.o2.criterion)) throw bad('O2');
+  if (new Set([i.o1.criterion, i.o2.criterion, i.o3.criterion]).size !== 3) throw bad('one criterion per outcome');
+  for (const x of [...i.replace.scenarios, ...i.replace.tests]) if (!DESIGN_SLUG.test(x)) throw bad('items to replace');
+  if (!i.replace.scenarios.length || !i.replace.tests.length || i.replace.scenarios.length > 8 || i.replace.tests.length > 8) throw bad('items to replace');
+}
+
+/**
+ * The reason KaneVerity passes to `maintain evolve --because`. Kane 0.10.5 adds it to the agent's
+ * opening message as "Because: <reason>" (it names the use case as the evolve target).
+ * Deterministic: the same inputs always give the same text.
+ */
+export function evolveInstruction(i: EvolveInputs): string {
+  checkEvolveInputs(i);
+  const [s1, s2, s3] = i.steps;
+  const list = (xs: string[]) => xs.join(', ');
+  // Two sentences, as Kane asks for a reason ("a sentence or two"); every constraint is kept.
+  const text = [
+    `Design exactly three scenario/test pairs for ${i.useCase}, one per documented outcome, each scenario exercising one criterion and each test verifying only that criterion with one matching structured check: O1 keeps ${i.o1.criterion} (presence of '${i.o1.label}'); O2 re-sends ${i.o2.criterion} with exactly the text "${i.o2.criterionText}" as a delta criterion whose test captures baseline: the full API keys list before '${s3}', then asserts every baseline key is still listed and at least one new key appears; O3 keeps ${i.o3.criterion} (absolute, equals '${i.o3.label}').`,
+    `Use only the documented steps '${s1}', '${s2}', '${s3}' in that order, add no other UI elements or steps, and replace ${list(i.replace.scenarios)} and ${list(i.replace.tests)} without reusing them.`,
+  ].join(' ');
+  if (Buffer.byteLength(text, 'utf8') > MAX_EVOLVE_INSTRUCTION_BYTES) throw new CommandError('The evolve instruction is too long.');
+  return text;
+}
+
+/**
+ * What an evolve may not change (fingerprints, sha256): existing store records and blobs,
+ * requirements, documentation, existing test files. `problems`: anything the walk could not
+ * fingerprint (an unreadable file or folder, a symbolic link, an unexpected entry); an evolve
+ * with any is never started.
+ */
+export interface EvolveScopePrint {
+  commits: { path: string; sha256: string }[];
+  blobs?: { path: string; sha256: string }[];
+  requirements: { path: string; sha256: string }[];
+  docs: { path: string; sha256: string }[];
+  testFiles: { path: string; sha256: string }[];
+  problems?: string[];
+}
+
+/** The exact words the user must send to approve the evolve (bound to the use-case version). */
+export function evolveAcknowledgement(ucCid: string): string {
+  return `I approve one evolve of use case ${ucCid.replace(/^sha256:/, '').slice(0, 12)} with KaneVerity's instruction: Kane re-designs it in a new generation, supersedes what it replaces, and no record is deleted.`;
+}
 
 /** The exact words the user must send to approve a forced redesign (bound to the use-case version and phase). */
 export function redesignAcknowledgement(ucCid: string, phase: RedesignPhase): string {
@@ -123,6 +198,12 @@ export type JobParams =
   | { kind: 'review'; tutorialId: string; writeId: string; ucCid: string; reviewer: string }
   /** B5: the approved tests' files (workspace-relative), planned only. */
   | { kind: 'dryrun'; tutorialId: string; files: string[] }
+  /**
+   * B5: `maintain evolve <use case> --because <instruction> --mode agent --answer evolve:<use case>=1`.
+   * The instruction is rebuilt from its inputs (evolveInstruction) before Kane starts; any other
+   * text is refused. The answer is Kane's own documented confirmation (1 = go ahead).
+   */
+  | { kind: 'evolve'; tutorialId: string; ucCid: string; useCase: string; reviewer: string; decisionId: string; inputs: EvolveInputs; instruction: string; acknowledgement: string; /** What the evolve must not change, fingerprinted before it starts. */ scope?: EvolveScopePrint }
   /** B5: the approved tests' files, bound to the use case and the readiness fingerprint checked before Kane starts. */
   | { kind: 'testrun'; tutorialId: string; ucCid: string; files: string[]; reviewer: string; readinessSha256: string };
 
@@ -172,6 +253,16 @@ function argsFor(p: JobParams): string[] {
       if (!Number.isInteger(p.max) || p.max < 1 || p.max > 8) throw new CommandError('max must be a whole number from 1 to 8.');
       if (p.redesign && !isRedesignPhase(p.redesign.phase)) throw new CommandError('A forced redesign may start only at the acs or scenarios phase.');
       return ['design', 'tests', '--use-case', p.useCase, '--mode', 'agent', '--max', String(p.max), ...(p.redesign ? [FORBIDDEN_FLAGS[2], '--phase', p.redesign.phase] : [])];
+    case 'evolve': {
+      // Documented: maintain evolve [ref] --because <reason> --mode agent --answer evolve:<use-case>=1|2.
+      sourceIdFor(p.tutorialId);
+      if (!CONTENT_ID.test(p.ucCid)) throw new CommandError('Invalid use-case content id.');
+      kaneUserFor(p.reviewer);
+      if (!LOGICAL_ID.test(p.useCase) || p.useCase.length > 120 || p.inputs?.useCase !== p.useCase) throw new CommandError('Invalid use-case reference.');
+      if (p.acknowledgement !== evolveAcknowledgement(p.ucCid)) throw new CommandError('The evolve was not acknowledged with the exact words.');
+      if (p.instruction !== evolveInstruction(p.inputs)) throw new CommandError("The evolve instruction is not KaneVerity's own (it does not match its inputs).");
+      return ['maintain', 'evolve', p.useCase, '--because', p.instruction, '--mode', 'agent', '--answer', `evolve:${p.useCase}=1`];
+    }
     case 'resume': {
       if (!SESSION_ID.test(p.sid)) throw new CommandError('Invalid session id.');
       const base = p.verb === 'extract' ? ['context', 'extract'] : p.verb === 'design' ? ['design', 'tests'] : null;

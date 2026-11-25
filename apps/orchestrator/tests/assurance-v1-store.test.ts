@@ -57,7 +57,7 @@ test('the actual V1 store reads, passes the checks, and shows exactly the V1 fin
   assert.equal(store.ok, true, store.problems.join(' '));
   // 2 records (V1), 3 after V-B4b wrote KaneVerity's verified approval, or 7 after the
   // approved V2 test design added records 4-7 (all checked below).
-  assert.ok([2, 3, 7].includes(store.records), `records: ${store.records}`);
+  assert.ok([2, 3, 7, 9].includes(store.records), `records: ${store.records}`);
   assert.deepEqual(store.builds, ['0.10.5']);
   assert.equal(store.sources.length, 1);
   assert.equal(store.sources[0].sourceId, 'kv-generate-an-api-key');
@@ -93,7 +93,19 @@ test('the actual V1 store reads, passes the checks, and shows exactly the V1 fin
   // Kane's own "skipped" verdict is read for information only.
   assert.deepEqual(store.kaneVerdicts.map((v) => [v.resolution, v.attributedTo]), [['skipped', 'human:owner']]);
   const REC2 = 'sha256:3be455d75e7bfa9a789eae9b0db6809ee8af6c2711a29bde04f47939f33fae65';
-  if (store.records === 7) {
+  if (store.records === 9) {
+    // After the approved forced redesign (2026-11-25): records 8-9 are generation 2 of uc-1
+    // (phases scenarios and wiring only, by Kane's design agent): sc-1 superseded by sc-2 as
+    // its reuse_of successor, and nothing else superseded. Records 1-7 are checked below.
+    const g = await readDesignGraph(path.join(tmp, '.context'), null);
+    const gen2 = g.records.slice(7);
+    assert.deepEqual(gen2.map((x) => [x.seq, x.intentVerb, x.createdBy, x.designPhase?.phase, x.designPhase?.generation]), [[8, 'design', 'ai:design-agent', 'scenarios', 2], [9, 'design', 'ai:design-agent', 'wiring', 2]]);
+    assert.equal(gen2[0].designGeneration?.supersedesGeneration, 1);
+    assert.deepEqual([...g.supersededNodes.values()].map((x) => [x.seq, x.reason]), [[8, '--force redesign of uc-1 by design-agent (reuse_of successor)']]);
+    assert.deepEqual([...g.nodes.values()].filter((n) => n.seq >= 8).map((n) => n.label), ['scenario']);
+    for (const f of (await readdir(path.join(tmp, '.context', 'commits'))).sort().slice(7)) await rm(path.join(tmp, '.context', 'commits', f));
+  }
+  if (store.records >= 7) {
     // After V2: records 4-7 are exactly the one approved test design of uc-1 (generation 1,
     // phases acs, scenarios, wiring, tests), by Kane's design agent, with no review items
     // and nothing superseded.

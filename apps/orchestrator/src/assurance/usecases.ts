@@ -30,7 +30,7 @@ import { findLeaks, scrub, scrubDeep } from '../verify/redact.ts';
 import { checkCitations, type CitationReport } from './citations.ts';
 import type { LineMapEntry } from './requirements.ts';
 import { isRedesignPhase, redesignAcknowledgement, type RedesignPhase, kaneUserFor, sourceIdFor } from './commands.ts';
-import { JOB_ID_PATTERN, jobStdoutPath, type AssuranceJobs, type JobRecord } from './jobs.ts';
+import { JOB_ID_PATTERN, jobStdoutPath, usedEvolve, type AssuranceJobs, type JobRecord } from './jobs.ts';
 import {
   blockingWrite,
   currentWrites,
@@ -645,7 +645,7 @@ export class AssuranceUseCases {
   private async designJobs(tutorialId: string, ucCid?: string): Promise<JobRecord[]> {
     return (await this.jobs.list(tutorialId)).filter((j) => {
       const p = j.params;
-      const cid = p.kind === 'design' ? p.ucCid : p.kind === 'resume' && p.verb === 'design' ? p.ucCid : undefined;
+      const cid = p.kind === 'design' || p.kind === 'evolve' ? p.ucCid : p.kind === 'resume' && p.verb === 'design' ? p.ucCid : undefined;
       return cid !== undefined && (!ucCid || cid === ucCid);
     });
   }
@@ -689,7 +689,10 @@ export class AssuranceUseCases {
    *   that job id. Nothing is ever retried automatically.
    */
   private async previousDesign(tutorialId: string, ucCid: string): Promise<{ block: string | null; needsAck: string | null; complete: string | null; needsAckState?: string; refused?: { jobId: string; beforeStart: boolean } }> {
-    const latest = (await this.designJobs(tutorialId, ucCid))[0];
+    return this.previousDesignOf((await this.designJobs(tutorialId, ucCid))[0]);
+  }
+
+  private previousDesignOf(latest: JobRecord | undefined): { block: string | null; needsAck: string | null; complete: string | null; needsAckState?: string; refused?: { jobId: string; beforeStart: boolean } } {
     if (!latest) return { block: null, needsAck: null, complete: null };
     const expired = latest.state === 'paused' && !!latest.pause?.expiresAt && Date.parse(latest.pause.expiresAt) < Date.now();
     if (latest.state === 'queued' || latest.state === 'running') return { block: `A test design for this use case is already ${latest.state} (job ${latest.jobId}).`, needsAck: null, complete: null };
@@ -697,6 +700,55 @@ export class AssuranceUseCases {
     if (latest.state === 'complete') return { block: `This use case already has a test design (job ${latest.jobId}). Designing it again needs an acknowledged forced redesign ({"redesign": {"phase": "acs" | "scenarios", "acknowledgement": "<exact text>"}}).`, needsAck: null, complete: latest.jobId };;
     if (latest.state === 'refused') return { block: null, needsAck: null, complete: null, refused: { jobId: latest.jobId, beforeStart: latest.exitCode === null } };
     return { block: null, needsAck: latest.jobId, complete: null, needsAckState: expired ? 'paused and expired' : latest.state };
+  }
+
+  /**
+   * A forced redesign or an evolve needs a complete design to replace: why there is none, as a
+   * refusal (B5). Every case refuses; only the explanation differs.
+   */
+  private refuseWithoutCompleteDesign(prev: Awaited<ReturnType<AssuranceUseCases['previousDesign']>>): never {
+    if (prev.block) throw new AssuranceError(409, prev.block);
+    if (prev.needsAck)
+      throw new AssuranceError(
+        409,
+        `Not started: the previous design attempt for this use case (job ${prev.needsAck}, ${prev.needsAckState}) ended with an incomplete or unknown outcome, so Kane may hold part of a design. A forced redesign is not started on top of it: recovering needs a separate, recorded decision (docs/ASSURANCE_PLAN.md section 13.7). Nothing was started and no credits were used.`,
+      );
+    if (prev.refused?.beforeStart)
+      throw new AssuranceError(
+        409,
+        `Not started: the previous design request for this use case (job ${prev.refused.jobId}) was refused before Kane started, so Kane's design did not run, no credits were used, and the existing complete design is intact. A forced redesign starts only when the latest design attempt is complete; going ahead after a refused request needs a separate, recorded decision. Nothing was started.`,
+      );
+    if (prev.refused)
+      throw new AssuranceError(
+        409,
+        `Not started: the previous design attempt for this use case (job ${prev.refused.jobId}, refused by Kane after it started) ended with an incomplete or unknown outcome, so Kane may hold part of a design. A forced redesign is not started on top of it: recovering needs a separate, recorded decision (docs/ASSURANCE_PLAN.md section 13.7). Nothing was started and no credits were used.`,
+      );
+    throw new AssuranceError(409, 'Not started: a forced redesign needs a complete test design of this use case to replace, and there is none.');
+  }
+
+  /**
+   * B5: the gates an evolve (paid, started by the design service) shares with a test design,
+   * for this exact use-case version: no write in progress or unknown, a complete design to
+   * replace (nothing in progress, paused or unknown), then a fresh read and every design
+   * condition (approved, verified in Kane, current requirements, the same logical id).
+   */
+  async evolveChecks(tutorialId: string, cid: string) {
+    if (!isTutorialId(tutorialId)) throw new AssuranceError(404, 'Tutorial not found.');
+    this.refuseWhileWriting(tutorialId);
+    return this.serial(`review:${tutorialId}`, async () => {
+      const reviewer = reviewerSetting();
+      if (!reviewer.label) throw new AssuranceError(409, reviewer.problem ?? 'No reviewer is set.');
+      const blocking = blockingWrite((await this.log(tutorialId)).kaneWrites);
+      if (blocking) throw new AssuranceError(409, this.lockedMessage(blocking));
+      const all = await this.designJobs(tutorialId, cid);
+      const used = usedEvolve(all, cid);
+      if (used) throw new AssuranceError(409, `Not started: an evolve of this use case was already started (job ${used.jobId}, ${used.state}). KaneVerity starts one evolve per use-case version; another needs a separate, recorded decision.`);
+      // A request KaneVerity refused before Kane started changed nothing: the design before it is what is evolved.
+      const prev = this.previousDesignOf(all.find((j) => !(j.state === 'refused' && j.exitCode === null)));
+      if (!prev.complete) this.refuseWithoutCompleteDesign(prev);
+      const { fresh, ucNow, decisionId } = await this.freshDesignChecks(tutorialId, cid);
+      return { fresh, ucNow, decisionId, reviewer: reviewer.label, previousJob: prev.complete };
+    });
   }
 
   /** Fresh read, then every design condition for the exact content id. Returns what the job binds to. */
@@ -746,27 +798,12 @@ export class AssuranceUseCases {
       const blocking = blockingWrite((await this.log(tutorialId)).kaneWrites);
       if (blocking) throw new AssuranceError(409, this.lockedMessage(blocking));
       await this.refuseWhileExternal(tutorialId);
+      // B5: after this version's one evolve, no design of it starts here either (plain or forced).
+      const used = usedEvolve(await this.designJobs(tutorialId, cid), cid);
+      if (used) throw new AssuranceError(409, `Not started: an evolve of this use case was already started (job ${used.jobId}, ${used.state}). A test design or forced redesign of this version after it needs a separate, recorded decision.`);
       const prev = await this.previousDesign(tutorialId, cid);
       // A forced redesign replaces a complete design; anything else in progress still blocks it.
-      if (redesign && !prev.complete) {
-        if (prev.block) throw new AssuranceError(409, prev.block);
-        if (prev.needsAck)
-          throw new AssuranceError(
-            409,
-            `Not started: the previous design attempt for this use case (job ${prev.needsAck}, ${prev.needsAckState}) ended with an incomplete or unknown outcome, so Kane may hold part of a design. A forced redesign is not started on top of it: recovering needs a separate, recorded decision (docs/ASSURANCE_PLAN.md section 13.7). Nothing was started and no credits were used.`,
-          );
-        if (prev.refused?.beforeStart)
-          throw new AssuranceError(
-            409,
-            `Not started: the previous design request for this use case (job ${prev.refused.jobId}) was refused before Kane started, so Kane's design did not run, no credits were used, and the existing complete design is intact. A forced redesign starts only when the latest design attempt is complete; going ahead after a refused request needs a separate, recorded decision. Nothing was started.`,
-          );
-        if (prev.refused)
-          throw new AssuranceError(
-            409,
-            `Not started: the previous design attempt for this use case (job ${prev.refused.jobId}, refused by Kane after it started) ended with an incomplete or unknown outcome, so Kane may hold part of a design. A forced redesign is not started on top of it: recovering needs a separate, recorded decision (docs/ASSURANCE_PLAN.md section 13.7). Nothing was started and no credits were used.`,
-          );
-        throw new AssuranceError(409, 'Not started: a forced redesign needs a complete test design of this use case to replace, and there is none.');
-      }
+      if (redesign && !prev.complete) this.refuseWithoutCompleteDesign(prev);
       if (prev.block && !(redesign && prev.complete)) throw new AssuranceError(409, prev.block);
       if (prev.needsAck && b.acknowledgePrevious !== prev.needsAck) {
         throw new AssuranceError(409, `The previous design attempt for this use case (job ${prev.needsAck}) ended without a known result. Kane may hold part of a design. Check it, then start again with {"acknowledgePrevious": "${prev.needsAck}"}; it is never retried automatically.`);
@@ -795,6 +832,8 @@ export class AssuranceUseCases {
     if (typeof jobId !== 'string' || !JOB_ID_PATTERN.test(jobId)) throw new AssuranceError(404, 'Job not found.');
     const job = await this.jobs.get(jobId);
     const p = job.params;
+    // B5: an evolve that paused is never answered, resumed or stopped here; that needs a separate decision.
+    if (p.kind === 'evolve' && job.tutorialId === tutorialId && p.ucCid === `sha256:${ucHex}`) throw new AssuranceError(409, `Job ${jobId} is an evolve. KaneVerity does not answer, resume or stop an evolve that paused or ended without a known result; continuing it needs a separate, recorded decision.`);
     const bound = p.kind === 'design' ? p : p.kind === 'resume' && p.verb === 'design' ? p : null;
     if (!bound || job.tutorialId !== tutorialId || bound.ucCid !== `sha256:${ucHex}`) throw new AssuranceError(404, 'No test-design job with this id for this use case.');
     return { job, bound: bound as { ucCid: string; decisionId?: string; reviewer?: string }, tutorialId, cid: `sha256:${ucHex}` };
@@ -835,7 +874,7 @@ export class AssuranceUseCases {
    */
   private async designPreflight(j: JobRecord): Promise<string | null> {
     const p = j.params;
-    const bound = p.kind === 'design' ? p : p.kind === 'resume' && p.verb === 'design' ? p : null;
+    const bound = p.kind === 'design' || p.kind === 'evolve' ? p : p.kind === 'resume' && p.verb === 'design' ? p : null;
     if (!bound || !j.tutorialId || !bound.ucCid || !bound.decisionId) return 'the job is not bound to a reviewed use case.';
     try {
       const reviewer = reviewerSetting();
@@ -849,7 +888,7 @@ export class AssuranceUseCases {
       if (r.latestId !== bound.decisionId) return 'the KaneVerity decision changed since the design was requested.';
       const elig = designEligibility({ state: r.state, integrityOk: snap.integrity.ok, inLatestSnapshot: true, requirementsCurrent: await this.requirementsCurrent(snap), kane: status });
       if (!elig.eligible) return elig.reasons.join(' ');
-      if (p.kind === 'design' && uc.logicalId !== p.useCase) return `Kane's id for this use case changed (${p.useCase} is now ${uc.logicalId}).`;
+      if ((p.kind === 'design' || p.kind === 'evolve') && uc.logicalId !== p.useCase) return `Kane's id for this use case changed (${p.useCase} is now ${uc.logicalId}).`;
       return null;
     } catch (err) {
       return `the checks could not be completed (${(err as Error).message}).`;
