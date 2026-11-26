@@ -329,11 +329,12 @@ export function createOrchestrator(runner = new Runner(), corrections = new Corr
       // and the app_url approval are KaneVerity's own records. No Kane write, design or test run.
       // Pre-execution steps (Kane approval writes of design items, the run variables file, a
       // free dry run) and the paid test run are only here, bound to one use case's content id.
-      const xMatch = /^\/api\/assurance\/designs\/([^/]+)\/([a-f0-9]{64})\/executions\/([^/]+)\/reconcile$/.exec(p);
+      // A run is reconciled (no known result) or re-checked (free, newer checker); neither runs Kane.
+      const xMatch = /^\/api\/assurance\/designs\/([^/]+)\/([a-f0-9]{64})\/executions\/([^/]+)\/(reconcile|recheck)$/.exec(p);
       if (xMatch && method === 'POST') {
-        const [, tutorialId, ucHex, executionId] = xMatch;
+        const [, tutorialId, ucHex, executionId, xAction] = xMatch;
         await readBody(req);
-        const e = await designs.reconcileExecution(tutorialId, ucHex, executionId);
+        const e = xAction === 'recheck' ? await designs.recheckExecution(tutorialId, ucHex, executionId) : await designs.reconcileExecution(tutorialId, ucHex, executionId);
         return json(res, 200, await designs.view(tutorialId, ucHex, e.reason));
       }
       const bMatch = /^\/api\/assurance\/designs\/([^/]+)\/([a-f0-9]{64})(?:\/(retrieve|review|app-url|run-variables|kane-write|kane-reconcile|dry-run|execute|evolve))?$/.exec(p);

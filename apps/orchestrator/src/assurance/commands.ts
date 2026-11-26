@@ -132,6 +132,78 @@ export interface EvolveScopePrint {
   problems?: string[];
 }
 
+/**
+ * The one corrective evolve (ASSURANCE_PLAN section 13.13): after the recording review rejected
+ * some tests because their recorded checks cannot meet the outcome evidence rules, Kane replaces
+ * only those tests and keeps every other item exactly as it is. Built from the requirements, the
+ * store and KaneVerity's recording decisions; never from user text.
+ */
+export interface CorrectiveInputs {
+  useCase: string;
+  steps: [string, string, string];
+  /** The tests the recording review rejected, each with what its new asserting step must read. */
+  replace: { test: string; scenario: string; outcome: string; criterion: string; requirement: 'status_region' | 'element_value' | 'baseline_change'; label: string | null }[];
+  /** Everything else, kept exactly as it is. */
+  keep: { criteria: string[]; scenarios: string[]; tests: string[] };
+}
+
+/**
+ * What a corrective evolve must leave exactly as it is, fingerprinted before it starts and checked
+ * after it ends: the kept items' content ids, the rejected tests' content ids (to be superseded),
+ * the kept tests' files and every live test's recording (the rejected ones are preserved too).
+ */
+export interface CorrectiveKeep {
+  criteria: { slug: string; cid: string }[];
+  scenarios: { slug: string; cid: string }[];
+  tests: { slug: string; cid: string }[];
+  rejected: { slug: string; cid: string }[];
+  testFiles: { path: string; sha256: string }[];
+  recordings: { testFile: string; dir: string; sha256: string | null }[];
+}
+
+function checkCorrectiveInputs(i: CorrectiveInputs): void {
+  const bad = (what: string) => new CommandError(`Invalid corrective evolve input: ${what}.`);
+  if (!LOGICAL_ID.test(i.useCase)) throw bad('use case');
+  if (!Array.isArray(i.steps) || i.steps.length !== 3 || !i.steps.every((x) => SAFE_TEXT.test(x))) throw bad('steps');
+  if (!Array.isArray(i.replace) || i.replace.length < 1 || i.replace.length > 4) throw bad('tests to replace');
+  for (const r of i.replace) {
+    if (!DESIGN_SLUG.test(r.test) || !DESIGN_SLUG.test(r.scenario) || !DESIGN_SLUG.test(r.criterion) || !/^O[0-9]{1,2}$/.test(r.outcome)) throw bad('a test to replace');
+    if (r.requirement === 'baseline_change' ? r.label !== null : !['status_region', 'element_value'].includes(r.requirement) || r.label === null || !SAFE_TEXT.test(r.label)) throw bad(`what ${r.test} must read`);
+  }
+  for (const x of [...i.keep.criteria, ...i.keep.scenarios, ...i.keep.tests]) if (!DESIGN_SLUG.test(x)) throw bad('items to keep');
+  if (!i.keep.criteria.length || !i.keep.scenarios.length || !i.keep.tests.length) throw bad('items to keep');
+  const replaced = new Set(i.replace.map((r) => r.test));
+  if (replaced.size !== i.replace.length || i.keep.tests.some((x) => replaced.has(x))) throw bad('a test both kept and replaced');
+}
+
+/**
+ * The reason KaneVerity passes to `maintain evolve --because` for the corrective evolve (two
+ * sentences, deterministic). Each rejected test gets a new title (so its new file never overwrites
+ * the original, which stays as recorded) and an asserting step that reads the value itself.
+ */
+export function correctiveEvolveInstruction(i: CorrectiveInputs): string {
+  checkCorrectiveInputs(i);
+  const [s1, s2, s3] = i.steps;
+  const list = (xs: string[]) => xs.join(', ');
+  const clause = (r: CorrectiveInputs['replace'][number]) =>
+    r.requirement === 'status_region'
+      ? `${r.test} (scenario ${r.scenario}, ${r.criterion}): after '${s3}', read the text of the status message region (role=status) and assert it is exactly '${r.label}'`
+      : r.requirement === 'element_value'
+        ? `${r.test} (scenario ${r.scenario}, ${r.criterion}): after '${s3}', read the text of the element that shows it and assert it is exactly '${r.label}'`
+        : `${r.test} (scenario ${r.scenario}, ${r.criterion}): capture baseline: the full API keys list before '${s3}', then after '${s3}' read the full API keys list again and assert that every baseline key is still listed and exactly one new key was added, asserting that new key's value`;
+  const text = [
+    `Replace only ${list(i.replace.map((r) => r.test))} of ${i.useCase}, each with a new test under a new title that automates the same scenario as the test it replaces (named with it below) with one matching structured check, its asserting step reading the value from the page: ${i.replace.map(clause).join('; ')}.`,
+    `Keep ${list(i.keep.criteria)}, ${list(i.keep.scenarios)} and ${list(i.keep.tests)} exactly as they are, use only the documented steps '${s1}', '${s2}', '${s3}' in that order, and add no other UI elements or steps.`,
+  ].join(' ');
+  if (Buffer.byteLength(text, 'utf8') > MAX_EVOLVE_INSTRUCTION_BYTES) throw new CommandError('The corrective evolve instruction is too long.');
+  return text;
+}
+
+/** The exact words the user must send to approve the one corrective evolve (bound to the use-case version and the tests it replaces). */
+export function correctiveEvolveAcknowledgement(ucCid: string, tests: string[]): string {
+  return `I approve one corrective evolve of use case ${ucCid.replace(/^sha256:/, '').slice(0, 12)} with KaneVerity's instruction: Kane replaces only ${tests.join(' and ')} with new tests, keeps every other item exactly as it is, and no record is deleted.`;
+}
+
 /** The exact words the user must send to approve the evolve (bound to the use-case version). */
 export function evolveAcknowledgement(ucCid: string): string {
   return `I approve one evolve of use case ${ucCid.replace(/^sha256:/, '').slice(0, 12)} with KaneVerity's instruction: Kane re-designs it in a new generation, supersedes what it replaces, and no record is deleted.`;
@@ -203,7 +275,7 @@ export type JobParams =
    * The instruction is rebuilt from its inputs (evolveInstruction) before Kane starts; any other
    * text is refused. The answer is Kane's own documented confirmation (1 = go ahead).
    */
-  | { kind: 'evolve'; tutorialId: string; ucCid: string; useCase: string; reviewer: string; decisionId: string; inputs: EvolveInputs; instruction: string; acknowledgement: string; /** What the evolve must not change, fingerprinted before it starts. */ scope?: EvolveScopePrint }
+  | { kind: 'evolve'; tutorialId: string; ucCid: string; useCase: string; reviewer: string; decisionId: string; inputs: EvolveInputs; instruction: string; acknowledgement: string; /** What the evolve must not change, fingerprinted before it starts. */ scope?: EvolveScopePrint; /** The one corrective evolve (section 13.13): its own instruction inputs and what it must keep. */ corrective?: { inputs: CorrectiveInputs; keep: CorrectiveKeep } }
   /** B5: the approved tests' files, bound to the use case and the readiness fingerprint checked before Kane starts. */
   | { kind: 'testrun'; tutorialId: string; ucCid: string; files: string[]; reviewer: string; readinessSha256: string };
 
@@ -259,8 +331,10 @@ function argsFor(p: JobParams): string[] {
       if (!CONTENT_ID.test(p.ucCid)) throw new CommandError('Invalid use-case content id.');
       kaneUserFor(p.reviewer);
       if (!LOGICAL_ID.test(p.useCase) || p.useCase.length > 120 || p.inputs?.useCase !== p.useCase) throw new CommandError('Invalid use-case reference.');
-      if (p.acknowledgement !== evolveAcknowledgement(p.ucCid)) throw new CommandError('The evolve was not acknowledged with the exact words.');
-      if (p.instruction !== evolveInstruction(p.inputs)) throw new CommandError("The evolve instruction is not KaneVerity's own (it does not match its inputs).");
+      if (p.corrective && p.corrective.inputs?.useCase !== p.useCase) throw new CommandError('Invalid use-case reference.');
+      const ack = p.corrective ? correctiveEvolveAcknowledgement(p.ucCid, p.corrective.inputs.replace.map((r) => r.test)) : evolveAcknowledgement(p.ucCid);
+      if (p.acknowledgement !== ack) throw new CommandError('The evolve was not acknowledged with the exact words.');
+      if (p.instruction !== (p.corrective ? correctiveEvolveInstruction(p.corrective.inputs) : evolveInstruction(p.inputs))) throw new CommandError("The evolve instruction is not KaneVerity's own (it does not match its inputs).");
       return ['maintain', 'evolve', p.useCase, '--because', p.instruction, '--mode', 'agent', '--answer', `evolve:${p.useCase}=1`];
     }
     case 'resume': {

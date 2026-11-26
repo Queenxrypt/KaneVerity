@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeZip } from './helpers.ts';
 import { analyzeAction, assertionOp, buildPack, goodMembers, LOCATORS, type PackMember } from './design-fixture.ts';
-import { requirementFor, verifyPack, type OutcomeTarget } from '../src/assurance/runEvidence.ts';
+import { readPackManifest, requirementFor, verifyPack, type OutcomeTarget } from '../src/assurance/runEvidence.ts';
 
 const ORIGIN = 'http://127.0.0.1:5174';
 const defs = { message: 'sha256:' + '1'.repeat(64), list: 'sha256:' + '2'.repeat(64), count: 'sha256:' + '3'.repeat(64) };
@@ -186,4 +186,20 @@ test('the pack itself must be finalized, from the pinned Kane, and stay on the a
   assert.equal(r.packOk, false);
   assert.equal(r.verified, false);
   assert.equal(verify(Buffer.from('not a zip')).verified, false);
+});
+
+test("pack manifest: the combined pack's own run id, the per-test packs it merged, and one entry per member (Kane 0.10.5 layout)", () => {
+  const runId = 'aaaaaaaa-1111-4222-8333-444444444444';
+  const merged = ['bbbbbbbb-1111-4222-8333-444444444444', 'cccccccc-1111-4222-8333-444444444444', 'dddddddd-1111-4222-8333-444444444444'];
+  const m = readPackManifest(buildPack({ members: goodMembers(defs, ORIGIN), appOrigin: ORIGIN, runId, mergedFrom: merged }, makeZip));
+  assert.deepEqual(m.problems, []);
+  assert.equal(m.runId, runId);
+  assert.deepEqual(m.mergedFrom, merged);
+  assert.deepEqual(m.members.map((x) => [x.definitionId, x.status]).sort(), [[defs.message, 'passed'], [defs.list, 'passed'], [defs.count, 'passed']]);
+  // A single-pack run: no merged_from.
+  assert.equal(readPackManifest(buildPack({ members: goodMembers(defs, ORIGIN), appOrigin: ORIGIN, runId }, makeZip)).mergedFrom, null);
+  // Unreadable or malformed: reported, never guessed.
+  assert.match(readPackManifest(Buffer.from('not a zip')).problems.join(' '), /cannot be read/);
+  assert.match(readPackManifest(makeZip([{ name: 'tests/x/result.yaml', data: 'status: passed\n' }])).problems.join(' '), /no readable run.yaml/);
+  assert.match(readPackManifest(makeZip([{ name: 'run.yaml', data: 'run_id: x\nmerged_from: not-a-list\n' }])).problems.join(' '), /merged_from is not a list/);
 });

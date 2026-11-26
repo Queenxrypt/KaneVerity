@@ -197,7 +197,10 @@ before(async () => {
   Object.assign(process.env, {
     KANEVERITY_DATA_DIR: path.join(work, 'data'),
     KANEVERITY_ASSURANCE_MODE: 'all',
-    KANEVERITY_ASSURANCE_TIMEOUT_MS: '8000',
+    // Test-only limit for one fake-Kane process (production: 30 minutes). These files spawn up to
+    // ~1,600 node processes each; under full-suite load (three files at a time) a process start
+    // was measured at up to 10 s, so 8 s killed healthy reads. 30 s is 3x the worst seen.
+    KANEVERITY_ASSURANCE_TIMEOUT_MS: '30000',
     KANEVERITY_REVIEWER: REVIEWER,
     KANE_CLI_ENTRY: path.join(TESTS_DIR, 'fake-kane-assurance.cjs'),
     KANEVERITY_DOCS_CONTENT_DIR: contentDir,
@@ -274,6 +277,14 @@ test("the opening message Kane builds from it stays within Kane's own limit (its
   // With Kane's longest session ids and no other opening text (agent mode); the margin covers an opening prompt of the same size again.
   const bytes = size.c(statement, 'design-20261125T204734-' + 'f'.repeat(40));
   assert.ok(bytes < size.b / 4, `${bytes} bytes of ${size.b}`);
+  // The corrective evolve's longest real case: two rejected tests (a change and a message), each
+  // paired with its scenario, and every other item kept (section 13.13).
+  const { correctiveEvolveInstruction, MAX_EVOLVE_INSTRUCTION_BYTES } = await import('../src/assurance/commands.ts');
+  const corrective = correctiveEvolveInstruction({ useCase: 'uc-1', steps: ['Developer Settings', 'API Keys', 'Generate Key'], replace: [{ test: 't-2', scenario: 'sc-3', outcome: 'O2', criterion: 'ac-4', requirement: 'baseline_change', label: null }, { test: 't-3', scenario: 'sc-4', outcome: 'O1', criterion: 'ac-3', requirement: 'status_region', label: 'API key generated successfully.' }], keep: { criteria: ['ac-2', 'ac-3', 'ac-4'], scenarios: ['sc-3', 'sc-4', 'sc-5'], tests: ['t-4'] } });
+  assert.match(corrective, /t-2 \(scenario sc-3, ac-4\): capture baseline: .*t-3 \(scenario sc-4, ac-3\): after 'Generate Key', read the text of the status message region/);
+  assert.ok(Buffer.byteLength(corrective, 'utf8') <= MAX_EVOLVE_INSTRUCTION_BYTES, `${Buffer.byteLength(corrective, 'utf8')} bytes`);
+  const cBytes = size.c(['[kane] evolve started on use-case uc-1 ("Generate an API key").', `Because: ${corrective}`, se].join('\n'), 'design-20261125T204734-' + 'f'.repeat(40));
+  assert.ok(cBytes < size.b / 4, `corrective: ${cBytes} bytes of ${size.b}`);
 });
 
 test('refused before any Kane command: own instruction, wrong acknowledgement, no paid confirmation, mode free, generic jobs API, no complete design', async () => {

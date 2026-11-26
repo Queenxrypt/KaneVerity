@@ -23,7 +23,7 @@ import { config } from '../config.ts';
 import { kaneLock, type KaneLock } from '../kane/lock.ts';
 import { addCredits, dataPath, readJson, writeJson, type CostBasis } from '../store.ts';
 import { findLeaks, scrub, scrubDeep } from '../verify/redact.ts';
-import { type EvolveInputs, type EvolveScopePrint, type RedesignPhase, buildArgs, CommandError, isJobKind, JOB_KINDS, kaneUserFor, parseBalance, parseIngestReceipt, requirementsFileFor, validateAnswers, type JobKind, type JobParams } from './commands.ts';
+import { type CorrectiveInputs, type CorrectiveKeep, type EvolveInputs, type EvolveScopePrint, type RedesignPhase, buildArgs, CommandError, isJobKind, JOB_KINDS, kaneUserFor, parseBalance, parseIngestReceipt, requirementsFileFor, validateAnswers, type JobKind, type JobParams } from './commands.ts';
 import { AssuranceError, RequirementsService } from './service.ts';
 import { isTutorialId } from './store.ts';
 import { applyAssuranceLine, emptyAssuranceStream, outcomeOf, type ParsedAssuranceStream, type PendingQuestion } from './stream.ts';
@@ -92,7 +92,12 @@ function newJobId(now = new Date()): string {
  * Read from the job records on disk, so it survives restarts.
  */
 export function usedEvolve(jobs: JobRecord[], ucCid: string): JobRecord | null {
-  return jobs.find((j) => j.params.kind === 'evolve' && j.params.ucCid === ucCid && !(j.state === 'refused' && j.exitCode === null)) ?? null;
+  return jobs.find((j) => j.params.kind === 'evolve' && j.params.ucCid === ucCid && !j.params.corrective && !(j.state === 'refused' && j.exitCode === null)) ?? null;
+}
+
+/** B5: the one corrective evolve of this use-case version (section 13.13), or null. Counted like usedEvolve. */
+export function usedCorrectiveEvolve(jobs: JobRecord[], ucCid: string): JobRecord | null {
+  return jobs.find((j) => j.params.kind === 'evolve' && j.params.ucCid === ucCid && !!j.params.corrective && !(j.state === 'refused' && j.exitCode === null)) ?? null;
 }
 
 /** A test-design job, the resume of a design session (V2), or an evolve (B5): never answered or stopped from the generic jobs API. */
@@ -276,12 +281,12 @@ export class AssuranceJobs extends EventEmitter {
    * confirmation). Called only by the design service after its fresh checks; right before Kane
    * starts, the design preflight re-checks the use case, the decision and the reviewer.
    */
-  async startEvolve(p: { tutorialId: string; ucCid: string; useCase: string; reviewer: string; decisionId: string; inputs: EvolveInputs; instruction: string; acknowledgement: string; scope?: EvolveScopePrint; requirements: JobRecord['requirements']; confirm: unknown }): Promise<JobRecord> {
+  async startEvolve(p: { tutorialId: string; ucCid: string; useCase: string; reviewer: string; decisionId: string; inputs: EvolveInputs; instruction: string; acknowledgement: string; scope?: EvolveScopePrint; corrective?: { inputs: CorrectiveInputs; keep: CorrectiveKeep }; requirements: JobRecord['requirements']; confirm: unknown }): Promise<JobRecord> {
     this.gate('evolve', p.confirm);
     if (!isTutorialId(p.tutorialId)) throw new AssuranceError(404, 'Tutorial not found.');
     const busy = [...this.records.values()].find((j) => j.tutorialId === p.tutorialId && (j.state === 'queued' || j.state === 'running'));
     if (busy) throw new AssuranceError(409, `A job for this tutorial is already ${busy.state}.`);
-    const params: JobParams = { kind: 'evolve', tutorialId: p.tutorialId, ucCid: p.ucCid, useCase: p.useCase, reviewer: p.reviewer, decisionId: p.decisionId, inputs: p.inputs, instruction: p.instruction, acknowledgement: p.acknowledgement, ...(p.scope ? { scope: p.scope } : {}) };
+    const params: JobParams = { kind: 'evolve', tutorialId: p.tutorialId, ucCid: p.ucCid, useCase: p.useCase, reviewer: p.reviewer, decisionId: p.decisionId, inputs: p.inputs, instruction: p.instruction, acknowledgement: p.acknowledgement, ...(p.scope ? { scope: p.scope } : {}), ...(p.corrective ? { corrective: p.corrective } : {}) };
     return this.enqueue('evolve', params, p.tutorialId, p.requirements, null);
   }
 

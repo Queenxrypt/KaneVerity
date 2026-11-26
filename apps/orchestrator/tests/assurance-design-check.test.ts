@@ -179,6 +179,19 @@ test('generation: an incomplete tests phase, an orphaned test, an item from an o
   assert.match(ev.generation.problems.join(' '), /full hash of design record 9/);
 });
 
+test('generation: only an item a checked corrective evolve kept, by its exact content id, may come from an older generation', () => {
+  // Kept by exact content id: accepted, with a note.
+  let ev = evaluateDesign(snapshot((x) => ((x.tests[0].generation = 1), (x.correctiveKeep = [x.tests[0].cid]))), REQ);
+  assert.equal(ev.generation.ok, true, ev.generation.problems.join(' '));
+  assert.match(ev.generation.notes.join(' '), /t-2 comes from generation 1 and was kept, unchanged, by the corrective evolve/);
+  // Any other older item still blocks, even with a keep list.
+  ev = evaluateDesign(snapshot((x) => ((x.tests[0].generation = 1), (x.tests[1].generation = 1), (x.correctiveKeep = [x.tests[0].cid]))), REQ);
+  assert.match(ev.generation.problems.join(' '), /t-3 is live but was made in generation 1/);
+  // No keep list (no checked corrective evolve): blocks.
+  ev = evaluateDesign(snapshot((x) => ((x.tests[0].generation = 1), (x.correctiveKeep = null))), REQ);
+  assert.match(ev.generation.problems.join(' '), /t-2 is live but was made in generation 1/);
+});
+
 test('files: a changed body, a different pin, a missing file and a stray file all block', () => {
   const ev = evaluateDesign(
     snapshot((x) => {

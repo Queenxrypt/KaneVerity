@@ -1,11 +1,17 @@
 // Post-execution verification of documented outcomes from a Kane evidence pack (B5). Pure.
 //
-// Evidence format, as Kane 0.10.5 wrote it in KaneVerity's own runs (2026-11-21 retest pack;
-// docs/ASSURANCE_PLAN.md section 13.8):
+// Evidence format, as Kane 0.10.5 wrote it in KaneVerity's own runs (the 2026-11-21 retest pack,
+// docs/ASSURANCE_PLAN.md section 13.8, and the real 2026-11-26 testrun's combined pack, 13.12 and
+// 13.13):
 //   run.yaml                       status: finalized, environment.producer {name, version},
-//                                  environment.surfaces [urls]
-//   tests/<member>/result.yaml     test, status, definition_id, steps[{id, ordinal, status,
-//                                  kind (navigate|click|analyze|assert|...), action_id, ...}]
+//                                  run_id, totals; a single pack has environment.run_kind (and
+//                                  surfaces); the combined pack of a testrun has merged_from (the
+//                                  per-test packs) and environment.run_kind_observed instead
+//   tests/<member>/result.yaml     test, status, definition_id, environment.run_kind (combined
+//                                  pack: the member's authoritative class), steps[{id, ordinal,
+//                                  status, kind (navigate|click|analyze|assert|...), action_id,
+//                                  verifies}] — Kane writes each verifies list once with a YAML
+//                                  anchor and refers to it with aliases (&ref_0 / *ref_0)
 //   tests/<member>/steps/*/step.json  {kind, status, summary, url, action_id, ...}
 //   tests/<member>/auteur/execution.json  operations; an ASSERTION operation has
 //                                  operation_id (= the step's action_id), assertion_status,
@@ -13,8 +19,9 @@
 //                                  operator, expected, store_key, variable_refs}]}; a
 //                                  TEXTUAL_ANALYZER operation has query_variable_name,
 //                                  query_variable_value and reasoning (the question asked).
-// Kane's code (0.10.5) reads a member's per-criterion steps from result.yaml `verifies`; the
-// testrun pack layout itself has not been seen yet, so anything missing fails closed.
+//   tests/<member>/logs/<n>-actions.ndjson  the analyze and assert actions (DOM reads).
+// Anything missing, unreadable or inconsistent fails closed. The origin is checked from run.yaml
+// surfaces (when present) and every step.json url; the network logs are not read.
 //
 // What counts: for each documented outcome, a passed ASSERTION operation, in the member whose
 // definition_id is the approved test's, on an `assert` step tagged with that outcome's criterion
@@ -264,45 +271,128 @@ function evaluateOutcome(t: OutcomeTarget, member: string, tagged: Record<string
 }
 
 // ---------------------------------------------------------------------------
-// A small YAML subset reader (maps, block lists, flow lists, quoted scalars). It only reads.
+// A small YAML subset reader. It only reads, and it reads only what Kane 0.10.5 writes in the
+// pack files KaneVerity checks (run.yaml, tests/<member>/result.yaml; checked on the real
+// 2026-11-26 pack): block maps, block lists, flow lists of plain scalars, plain, single- and
+// double-quoted scalars, and anchors with aliases (`key: &ref_0` + block, `key: *ref_0`), which
+// js-yaml writes for a value it repeats (each step's `verifies` list). Anything else fails
+// closed with a YamlError: merge keys, tags, block scalars, flow maps, complex keys, document
+// markers, unknown or repeated anchors, a line it cannot place, tab indentation, duplicate keys.
 // ---------------------------------------------------------------------------
 
 type Yaml = string | number | boolean | null | Yaml[] | { [k: string]: Yaml };
 
-function scalar(raw: string): Yaml {
+export class YamlError extends Error {}
+
+const KEY = /^([A-Za-z0-9_.-]+):(?: (.*))?$/;
+const ANCHOR_NAME = /^[A-Za-z0-9_-]{1,64}$/;
+
+function scalar(raw: string, line: number): Yaml {
   const v = raw.trim();
+  const bad = (what: string) => new YamlError(`unsupported YAML at line ${line}: ${what}`);
   if (v === '' || v === '~' || v === 'null') return null;
   if (v === 'true') return true;
   if (v === 'false') return false;
   if (/^-?[0-9]+(\.[0-9]+)?$/.test(v)) return Number(v);
-  if (v.startsWith('[') && v.endsWith(']')) return v.slice(1, -1).split(',').map((x) => scalar(x)).filter((x) => x !== null);
-  if ((v.startsWith("'") && v.endsWith("'")) || (v.startsWith('"') && v.endsWith('"'))) return v.slice(1, -1).replace(/''/g, "'");
+  if (v.startsWith('!')) throw bad('a tag');
+  if (/^[|>][-+0-9]*$/.test(v)) throw bad('a block scalar');
+  if (v.startsWith('{')) throw bad('a flow map');
+  if (/^[%@`]/.test(v)) throw bad('a reserved indicator');
+  if (v.startsWith('&') || v.startsWith('*')) throw bad('an anchor or alias in an unsupported position');
+  if (v.startsWith('[')) {
+    if (!v.endsWith(']')) throw bad('an unclosed flow list');
+    const inner = v.slice(1, -1);
+    if (/[[\]{}'"&*!]/.test(inner)) throw bad('a flow list with nested, quoted or anchored items');
+    if (!inner.trim()) return [];
+    return inner.split(',').map((x) => {
+      if (!x.trim()) throw bad('an empty flow list item');
+      return scalar(x, line);
+    });
+  }
+  if (v.startsWith("'")) {
+    if (v.length < 2 || !v.endsWith("'")) throw bad('an unclosed single-quoted string');
+    const body = v.slice(1, -1);
+    if (/'/.test(body.replace(/''/g, ''))) throw bad('a single-quoted string with an unescaped quote');
+    return body.replace(/''/g, "'");
+  }
+  if (v.startsWith('"')) {
+    if (v.length < 2 || !v.endsWith('"')) throw bad('an unclosed double-quoted string');
+    try {
+      // YAML's double-quoted escapes include JSON's; any other escape fails closed.
+      const s = JSON.parse(v);
+      if (typeof s !== 'string') throw new Error('not a string');
+      return s;
+    } catch {
+      throw bad('a double-quoted string with an escape KaneVerity does not read');
+    }
+  }
+  if (/ #/.test(v)) throw bad('a comment after a value');
+  if (/: /.test(v) || v.endsWith(':')) throw bad('a plain value containing ": "');
   return v;
 }
 
+/** Parse the YAML subset above. Throws YamlError on anything outside it (never guesses). */
 export function parseYaml(text: string): Yaml {
-  const lines = text
-    .split(/\r?\n/)
-    .filter((l) => l.trim() && !l.trim().startsWith('#'))
-    .map((l) => ({ indent: l.length - l.trimStart().length, text: l.trim() }));
+  const raw = text.split(/\r?\n/);
+  const lines: { indent: number; text: string; n: number }[] = [];
+  raw.forEach((l, k) => {
+    if (!l.trim() || l.trim().startsWith('#')) return;
+    const lead = /^[ \t]*/.exec(l)![0];
+    if (lead.includes('\t')) throw new YamlError(`unsupported YAML at line ${k + 1}: tab indentation`);
+    const t = l.trim();
+    if (/^(---|\.\.\.)(\s|$)/.test(t)) throw new YamlError(`unsupported YAML at line ${k + 1}: a document marker`);
+    if (/^(-\s+)?<<\s*:/.test(t)) throw new YamlError(`unsupported YAML at line ${k + 1}: a merge key`);
+    if (/^(-\s+)?\?(\s|$)/.test(t)) throw new YamlError(`unsupported YAML at line ${k + 1}: a complex key`);
+    lines.push({ indent: lead.length, text: t, n: k + 1 });
+  });
+  const anchors = new Map<string, Yaml>();
+  const define = (name: string, value: Yaml, n: number) => {
+    if (!ANCHOR_NAME.test(name)) throw new YamlError(`unsupported YAML at line ${n}: an anchor name`);
+    if (anchors.has(name)) throw new YamlError(`unsupported YAML at line ${n}: the anchor &${name} is defined twice`);
+    anchors.set(name, value);
+    return value;
+  };
+  const alias = (name: string, n: number): Yaml => {
+    if (!anchors.has(name)) throw new YamlError(`unsupported YAML at line ${n}: the alias *${name} has no anchor before it`);
+    return structuredClone(anchors.get(name)!);
+  };
   let i = 0;
+  /** A value written after "key: " or "- ": an alias, an anchored inline value, or a scalar. */
+  function inline(v: string, n: number): Yaml {
+    const a = /^\*(\S+)$/.exec(v);
+    if (a) return alias(a[1], n);
+    const an = /^&(\S+)\s+(.+)$/.exec(v);
+    if (an) return define(an[1], scalar(an[2], n), n);
+    return scalar(v, n);
+  }
+  /** The block that follows a line ending in "key:" or "key: &name" (null when nothing is nested). */
+  function nested(parentIndent: number, dashParent: boolean): Yaml {
+    if (i < lines.length && (lines[i].indent > parentIndent || (!dashParent && lines[i].indent === parentIndent && isItem(lines[i].text)))) return block(lines[i].indent);
+    return null;
+  }
+  const isItem = (t: string) => t.startsWith('- ') || t === '-';
   function block(indent: number): Yaml {
     if (i >= lines.length) return null;
-    if (lines[i].text.startsWith('- ') || lines[i].text === '-') {
+    if (isItem(lines[i].text)) {
       const arr: Yaml[] = [];
-      while (i < lines.length && lines[i].indent === indent && (lines[i].text.startsWith('- ') || lines[i].text === '-')) {
+      while (i < lines.length && lines[i].indent === indent && isItem(lines[i].text)) {
+        const { n } = lines[i];
         const rest = lines[i].text.slice(1).trim();
         const itemIndent = indent + 2;
-        if (!rest) {
+        const anchorOnly = /^&(\S+)$/.exec(rest);
+        if (!rest || anchorOnly) {
           i++;
-          arr.push(block(lines[i]?.indent ?? itemIndent));
-        } else if (/^[A-Za-z0-9_.-]+:( |$)/.test(rest)) {
-          // A map item starting on the dash line: treat it as a line at itemIndent.
-          lines[i] = { indent: itemIndent, text: rest };
+          const v = nested(indent, true);
+          arr.push(anchorOnly ? define(anchorOnly[1], v, n) : v);
+        } else if (isItem(rest)) {
+          throw new YamlError(`unsupported YAML at line ${n}: a list nested on the same line`);
+        } else if (KEY.test(rest)) {
+          // A map item starting on the dash line: read it as a line at itemIndent.
+          lines[i] = { indent: itemIndent, text: rest, n };
           arr.push(map(itemIndent));
         } else {
           i++;
-          arr.push(scalar(rest));
+          arr.push(inline(rest, n));
         }
       }
       return arr;
@@ -310,21 +400,34 @@ export function parseYaml(text: string): Yaml {
     return map(indent);
   }
   function map(indent: number): Yaml {
-    const obj: { [k: string]: Yaml } = {};
-    while (i < lines.length && lines[i].indent === indent && !lines[i].text.startsWith('- ')) {
-      const m = /^([A-Za-z0-9_.-]+):(?: (.*))?$/.exec(lines[i].text);
-      if (!m) {
-        i++;
-        continue;
-      }
+    const out: { [k: string]: Yaml } = {};
+    while (i < lines.length && lines[i].indent === indent && !isItem(lines[i].text)) {
+      const { n } = lines[i];
+      const m = KEY.exec(lines[i].text);
+      if (!m) throw new YamlError(`unsupported YAML at line ${n}: a line that is not "key: value"`);
+      if (Object.prototype.hasOwnProperty.call(out, m[1])) throw new YamlError(`unsupported YAML at line ${n}: the key ${m[1]} appears twice`);
       i++;
-      if (m[2] !== undefined && m[2].trim() !== '') obj[m[1]] = scalar(m[2]);
-      else if (i < lines.length && (lines[i].indent > indent || (lines[i].indent === indent && lines[i].text.startsWith('- ')))) obj[m[1]] = block(lines[i].indent);
-      else obj[m[1]] = null;
+      const v = m[2]?.trim() ?? '';
+      const anchorOnly = /^&(\S+)$/.exec(v);
+      if (anchorOnly) out[m[1]] = define(anchorOnly[1], nested(indent, false), n);
+      else if (v !== '') out[m[1]] = inline(v, n);
+      else out[m[1]] = nested(indent, false);
     }
-    return obj;
+    return out;
   }
-  return block(lines[0]?.indent ?? 0);
+  const doc = block(lines[0]?.indent ?? 0);
+  if (i < lines.length) throw new YamlError(`unsupported YAML at line ${lines[i].n}: unexpected indentation or structure`);
+  return doc;
+}
+
+/** parseYaml for the pack readers: the value, or why the file cannot be read. */
+function readYaml(text: string): { value: Yaml; error: string | null } {
+  try {
+    return { value: parseYaml(text), error: null };
+  } catch (err) {
+    if (err instanceof YamlError) return { value: null, error: err.message };
+    throw err;
+  }
 }
 
 const obj = (v: unknown) => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null);
@@ -350,6 +453,56 @@ function operations(v: unknown, out: Record<string, unknown>[] = []): Record<str
   return out;
 }
 
+export interface PackManifest {
+  problems: string[];
+  /** run.yaml run_id: the pack's own id (Kane 0.10.5: the run's evidence id). */
+  runId: string | null;
+  /** run.yaml merged_from: the per-test packs a combined pack was merged from (null when absent). */
+  mergedFrom: string[] | null;
+  /** One per tests/<member>/result.yaml: only the fields that identify the member. */
+  members: { name: string; definitionId: string | null; status: string | null }[];
+}
+
+/**
+ * Which run and which tests a pack holds (combined testrun pack, Kane 0.10.5: run.yaml run_id and
+ * merged_from; tests/<member>/result.yaml definition_id and status). Reads nothing else. Pure.
+ */
+export function readPackManifest(buf: Buffer): PackManifest {
+  const res: PackManifest = { problems: [], runId: null, mergedFrom: null, members: [] };
+  let entries: Map<string, ZipEntry>;
+  try {
+    entries = readIndex(buf).entries;
+  } catch (err) {
+    res.problems.push(`The evidence pack cannot be read: ${(err as Error).message}`);
+    return res;
+  }
+  const text = (name: string) => {
+    const e = entries.get(name);
+    return e ? readEntry(buf, e).toString('utf8') : null;
+  };
+  const runY = readYaml(text('run.yaml') ?? '');
+  const run = obj(runY.value);
+  if (!run) {
+    res.problems.push(runY.error ? `run.yaml cannot be read (${runY.error}).` : 'The pack has no readable run.yaml.');
+    return res;
+  }
+  res.runId = str(run.run_id);
+  if (run.merged_from !== undefined && run.merged_from !== null) {
+    const mf = Array.isArray(run.merged_from) ? run.merged_from : null;
+    if (!mf || mf.some((x) => typeof x !== 'string')) res.problems.push('run.yaml merged_from is not a list of pack ids.');
+    else res.mergedFrom = mf as string[];
+  }
+  for (const name of [...entries.keys()].sort()) {
+    const m = /^tests\/([^/]+)\/result\.yaml$/.exec(name);
+    if (!m) continue;
+    const y = readYaml(text(name) ?? '');
+    const r = obj(y.value);
+    if (!r) res.problems.push(`tests/${m[1]}/result.yaml cannot be read${y.error ? ` (${y.error})` : ''}.`);
+    else res.members.push({ name: m[1], definitionId: str(r.definition_id), status: str(r.status) });
+  }
+  return res;
+}
+
 export function verifyPack(buf: Buffer, input: { appOrigin: string; pinnedVersion: string; targets: OutcomeTarget[]; requireReplay?: boolean }): PackVerification {
   const problems: string[] = [];
   const res: PackVerification = { packOk: false, problems, producer: null, runStatus: null, runKind: null, outcomes: [], verified: false };
@@ -367,17 +520,15 @@ export function verifyPack(buf: Buffer, input: { appOrigin: string; pinnedVersio
   };
 
   // The run as a whole: finalized, produced by the pinned Kane, only the application's origin.
-  const run = obj(parseYaml(text('run.yaml') ?? ''));
+  const runY = readYaml(text('run.yaml') ?? '');
+  const run = obj(runY.value);
   const env = obj(run?.environment);
   const producer = obj(env?.producer);
   res.runStatus = str(run?.status);
   res.producer = producer ? `${str(producer.name)} ${str(producer.version)}` : null;
-  if (!run) problems.push('The pack has no readable run.yaml.');
+  if (!run) problems.push(runY.error ? `run.yaml cannot be read (${runY.error}).` : 'The pack has no readable run.yaml.');
   if (res.runStatus !== 'finalized') problems.push(`The run is not finalized (status: ${res.runStatus ?? 'missing'}).`);
   if (str(producer?.name) !== 'kane-cli' || str(producer?.version) !== input.pinnedVersion) problems.push(`The pack was not produced by kane-cli ${input.pinnedVersion} (${res.producer ?? 'unknown'}).`);
-  res.runKind = str(env?.run_kind);
-  // A verification run must be a pure replay: any authored step makes it an authoring run.
-  if (input.requireReplay && res.runKind !== 'replay') problems.push(`This run is not a pure replay (run_kind: ${res.runKind ?? 'missing'}): Kane authored steps, so it cannot verify anything.`);
   for (const s of Array.isArray(env?.surfaces) ? env!.surfaces : []) {
     const o = typeof s === 'string' ? originOf(s) : null;
     if (o && o !== input.appOrigin) problems.push(`The run reached an unexpected origin (${o}).`);
@@ -385,14 +536,42 @@ export function verifyPack(buf: Buffer, input: { appOrigin: string; pinnedVersio
 
   // Members (one per test), with their result.yaml.
   const members = new Map<string, Record<string, unknown>>();
-  for (const name of entries.keys()) {
+  for (const name of [...entries.keys()].sort()) {
     const m = /^tests\/([^/]+)\/result\.yaml$/.exec(name);
     if (m) {
-      const r = obj(parseYaml(text(name) ?? ''));
+      const y = readYaml(text(name) ?? '');
+      const r = obj(y.value);
       if (r) members.set(m[1], r);
-      else problems.push(`tests/${m[1]}/result.yaml cannot be read.`);
+      else problems.push(`tests/${m[1]}/result.yaml cannot be read${y.error ? ` (${y.error})` : ''}.`);
     }
   }
+
+  // The run kind. A single pack keeps environment.run_kind in run.yaml. Kane 0.10.5's combined
+  // (merged) pack moves it to environment.run_kind_observed and writes each member's
+  // authoritative class into its result.yaml environment.run_kind, adding run_kind_observed there
+  // when the two differ (verified in Kane's merge code). A run is a replay only when every
+  // member is; anything missing, unknown or contradictory fails closed.
+  const KINDS = ['author', 'replay'];
+  const topKind = str(env?.run_kind);
+  const observed = str(env?.run_kind_observed);
+  const memberKinds = [...members.entries()].map(([name, r]) => {
+    const e = obj(r.environment);
+    return { name, kind: str(e?.run_kind), observed: str(e?.run_kind_observed) };
+  });
+  for (const k of [topKind, observed, ...memberKinds.flatMap((m) => [m.kind, m.observed])]) if (k !== null && !KINDS.includes(k)) problems.push(`The pack records an unknown run kind ("${k}").`);
+  if (topKind !== null && observed !== null) problems.push('run.yaml records both run_kind and run_kind_observed, so the run kind is ambiguous.');
+  for (const m of memberKinds) if (m.kind !== null && m.observed !== null && m.observed !== m.kind) problems.push(`Member ${m.name} is classed as ${m.kind} but was observed as ${m.observed}.`);
+  let kind: string | null;
+  if (observed !== null || memberKinds.some((m) => m.kind !== null)) {
+    const missing = memberKinds.filter((m) => m.kind === null);
+    if (missing.length) problems.push(`The pack's members ${missing.map((m) => m.name).join(', ')} record no run kind.`);
+    kind = memberKinds.length && !missing.length ? (memberKinds.every((m) => m.kind === 'replay') ? 'replay' : 'author') : null;
+    if (observed !== null && kind !== null && observed !== kind) problems.push(`run.yaml says the run was observed as ${observed}, but its members say ${kind}.`);
+    if (topKind !== null && kind !== null && topKind !== kind) problems.push(`run.yaml says ${topKind}, but its members say ${kind}.`);
+  } else kind = topKind;
+  res.runKind = kind;
+  // A verification run must be a pure replay: any authored step makes it an authoring run.
+  if (input.requireReplay && res.runKind !== 'replay') problems.push(`This run is not a pure replay (run_kind: ${res.runKind ?? 'missing'}): Kane authored steps, so it cannot verify anything.`);
   // Every step's URL must be on the application's origin.
   for (const name of entries.keys()) {
     if (!/^tests\/[^/]+\/steps\/[^/]+\/step\.json$/.test(name)) continue;

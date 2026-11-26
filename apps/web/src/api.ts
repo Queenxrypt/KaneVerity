@@ -66,9 +66,11 @@ export const api = {
   kaneWriteItem: (tutorialId: string, cid: string, target: string) => request<DesignReviewResponse>(`${designPath(tutorialId, cid)}/kane-write`, { method: 'POST', body: { target } }),
   reconcileKaneItem: (tutorialId: string, cid: string, target: string) => request<DesignReviewResponse>(`${designPath(tutorialId, cid)}/kane-reconcile`, { method: 'POST', body: { target } }),
   dryRunDesign: (tutorialId: string, cid: string) => request<DesignReviewResponse>(`${designPath(tutorialId, cid)}/dry-run`, { method: 'POST', body: {} }),
-  executeDesign: (tutorialId: string, cid: string, phase: 'authoring' | 'verification') =>
-    request<DesignReviewResponse>(`${designPath(tutorialId, cid)}/execute`, { method: 'POST', body: { confirm: { paid: true }, phase } }),
+  // An authoring run sends the exact tests its confirmation showed; the backend refuses if they changed.
+  executeDesign: (tutorialId: string, cid: string, phase: 'authoring' | 'verification', tests?: string[]) =>
+    request<DesignReviewResponse>(`${designPath(tutorialId, cid)}/execute`, { method: 'POST', body: { confirm: { paid: true, ...(tests ? { tests } : {}) }, phase } }),
   reconcileExecution: (tutorialId: string, cid: string, executionId: string) => request<DesignReviewResponse>(`${designPath(tutorialId, cid)}/executions/${encodeURIComponent(executionId)}/reconcile`, { method: 'POST', body: {} }),
+  recheckExecution: (tutorialId: string, cid: string, executionId: string) => request<DesignReviewResponse>(`${designPath(tutorialId, cid)}/executions/${encodeURIComponent(executionId)}/recheck`, { method: 'POST', body: {} }),
   // Assurance B3: use cases and KaneVerity's own review.
   useCases: (tutorialId: string) => request<UseCasesResponse>(`/assurance/usecases/${encodeURIComponent(tutorialId)}`),
   retrieveUseCases: (tutorialId: string) => request<UseCasesResponse>(`/assurance/usecases/${encodeURIComponent(tutorialId)}/retrieve`, { method: 'POST', body: {} }),

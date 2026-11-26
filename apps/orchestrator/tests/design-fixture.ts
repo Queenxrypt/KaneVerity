@@ -226,13 +226,21 @@ export function assertionOp(actionId: string, storeKey: string, expected: string
   };
 }
 
-export function buildPack(opts: { members: PackMember[]; runStatus?: string; producerVersion?: string; surfaces?: string[]; appOrigin: string; runKind?: string }, makeZip: (e: { name: string; data: string; method?: 0 | 8 }[]) => Buffer): Buffer {
+/**
+ * layout 'combined' writes the pack as Kane 0.10.5 merges a testrun of several tests (the real
+ * 2026-11-26 pack): run.yaml has run_kind_observed and no run_kind, each member's result.yaml has
+ * environment.run_kind (memberKinds per member; null leaves it out). With anchors, each tagged
+ * step's verifies list is written as js-yaml does ("verifies: &ref_0" and the list on the first
+ * tagged step, "verifies: *ref_0" after it), with the click before the assert tagged too.
+ */
+export function buildPack(opts: { members: PackMember[]; runStatus?: string; producerVersion?: string; surfaces?: string[]; appOrigin: string; runKind?: string; runId?: string; mergedFrom?: string[]; layout?: 'single' | 'combined'; anchors?: boolean; memberKinds?: (string | null)[]; memberObserved?: (string | null)[]; observedKind?: string | null; topKind?: string | null }, makeZip: (e: { name: string; data: string; method?: 0 | 8 }[]) => Buffer): Buffer {
   const entries: { name: string; data: string; method?: 0 | 8 }[] = [];
   entries.push({
     name: 'run.yaml',
     data: [
       "evidence: '0.1'",
-      'run_id: 00000000-0000-0000-0000-000000000001',
+      `run_id: ${opts.runId ?? '00000000-0000-0000-0000-000000000001'}`,
+      ...(opts.mergedFrom ? ['merged_from:', ...opts.mergedFrom.map((m) => `  - ${m}`)] : []),
       `status: ${opts.runStatus ?? 'finalized'}`,
       'environment:',
       '  producer:',
@@ -240,24 +248,41 @@ export function buildPack(opts: { members: PackMember[]; runStatus?: string; pro
       `    version: ${opts.producerVersion ?? '0.10.5'}`,
       '  surfaces:',
       ...(opts.surfaces ?? [opts.appOrigin + '/']).map((s) => `    - ${s}`),
-      `  run_kind: ${opts.runKind ?? 'replay'}`,
+      ...(opts.layout === 'combined' ? (opts.observedKind === null ? [] : [`  run_kind_observed: ${opts.observedKind ?? opts.runKind ?? 'replay'}`]) : []),
+      ...(opts.layout === 'combined' ? (opts.topKind ? [`  run_kind: ${opts.topKind}`] : []) : [`  run_kind: ${opts.runKind ?? 'replay'}`]),
       'totals:',
       `  tests: ${opts.members.length}`,
       '',
     ].join('\n'),
   });
-  for (const m of opts.members) {
-    const lines = ["evidence: '0.1'", `test: ${m.name}`, `status: ${m.status ?? 'passed'}`, `definition_id: ${m.definitionId}`, 'steps:'];
-    for (const s of m.steps) {
+  opts.members.forEach((m, mi) => {
+    const lines = ["evidence: '0.1'", `test: ${m.name}`, `status: ${m.status ?? 'passed'}`, `definition_id: ${m.definitionId}`];
+    const mk = opts.memberKinds ? opts.memberKinds[mi] : (opts.runKind ?? 'replay');
+    const mo = opts.memberObserved?.[mi];
+    if (opts.layout === 'combined' && ((mk !== null && mk !== undefined) || mo)) lines.push('environment:', ...(mk !== null && mk !== undefined ? [`  run_kind: ${mk}`] : []), ...(mo ? [`  run_kind_observed: ${mo}`] : []));
+    lines.push('steps:');
+    // Kane tags every sub-step of the asserting step: here the click before the assert too.
+    const tagged = opts.anchors ? m.steps.map((s, i) => ({ ...s, verifies: s.verifies ?? (m.steps[i + 1]?.kind === 'assert' ? m.steps[i + 1].verifies : undefined) })) : m.steps;
+    const anchorOf = new Map<string, string>();
+    for (const s of tagged) {
       lines.push(`  - id: 0-${s.ordinal}`, `    ordinal: ${s.ordinal}`, `    status: ${s.status ?? 'passed'}`, `    kind: ${s.kind}`, `    action_id: ${s.actionId}`);
-      if (s.verifies) lines.push(`    verifies: [${s.verifies.join(', ')}]`);
+      if (s.verifies && opts.anchors) {
+        const key = s.verifies.join(',');
+        const ref = anchorOf.get(key);
+        if (ref) lines.push(`    verifies: *${ref}`);
+        else {
+          const name = `ref_${anchorOf.size}`;
+          anchorOf.set(key, name);
+          lines.push(`    verifies: &${name}`, ...s.verifies.map((v) => `      - ${v}`));
+        }
+      } else if (s.verifies) lines.push(`    verifies: [${s.verifies.join(', ')}]`);
       entries.push({ name: `tests/${m.name}/steps/${s.ordinal}-0-${s.ordinal}/step.json`, data: JSON.stringify({ kind: s.kind, status: s.status ?? 'passed', summary: `${s.kind}: step ${s.ordinal}`, url: s.url ?? opts.appOrigin + '/developer/api-keys', action_id: s.actionId, ordinal: s.ordinal, id: `0-${s.ordinal}` }) });
     }
     entries.push({ name: `tests/${m.name}/result.yaml`, data: lines.join('\n') + '\n' });
     entries.push({ name: `tests/${m.name}/auteur/execution.json`, data: JSON.stringify({ status: 'success', instructions: [{ status: 'success', children: m.ops }] }) });
     entries.push({ name: `tests/${m.name}/logs/0-actions.ndjson`, data: m.actions.map((a) => JSON.stringify(a)).join('\n') + '\n' });
     for (const [file, lines] of Object.entries(m.otherLogs ?? {})) entries.push({ name: `tests/${m.name}/logs/${file}`, data: lines.map((a) => JSON.stringify(a)).join('\n') + '\n' });
-  }
+  });
   return makeZip(entries);
 }
 
@@ -434,6 +459,32 @@ export function generation3(uc: string, g1: DesignIds, g2: RealGen2Ids, instruct
           ],
     },
   };
+}
+
+/**
+ * What a corrective evolve (section 13.13) commits over generation 2: a new generation with only a
+ * tests phase that supersedes the message test (t-2) with t-5, a test under a new title (so a new
+ * file), automating the same scenario (sc-2) and verifying ac-3, whose asserting step reads the
+ * status region. Everything else is kept (no record for it). Faults: alsoSupersede (content ids it
+ * had to keep), noReplace (t-2 is not superseded).
+ */
+export function correctiveGeneration(uc: string, g1: DesignIds, g2: { sc2: string; t2: string }, instruction: string, opts: { alsoSupersede?: string[]; noReplace?: boolean } = {}) {
+  const why = (tag?: string) => `${instruction} — evolve by design-agent${tag ? ` (${tag})` : ''}`;
+  const body = `# Read the success message from the status region\n\n> One outcome.\n\n${NAV}\n## Step 3 @verifies ac-3\n\nUse 'Generate Key', then read the text of the status message region (role=status) and assert it is exactly 'API key generated successfully.'.\n`;
+  const t = test('Read the success message from the status region', body, { kind: 'presence', operator: 'exists', operand: 'API key generated successfully.', baseline: null, verified_against: 'ac-3', expected_mode: 'authored' }, 'objectives:\n  - objective: a\n    step: 1\n');
+  const t5 = cidOf('test', t.content);
+  const e = (type: string, src: string, dst: string) => ({ ecid: `sha256:${sha(type + src + dst)}`, type, src, dst, props: {} });
+  const record = {
+    design_phase: { uc_root: uc, generation: 3, phase: 'tests', completeness: 'complete', payload_digest: 'sha256:' + '5'.repeat(64) },
+    design_generation: { uc_root: uc, uc_cid: uc, generation: 3, supersedes_generation: 2, because: instruction, by },
+    intent_verb: 'design',
+    created_by: { build: '0.10.5', by },
+    nodes: [{ cid: t5, label: 'test', content: t.content }],
+    edges: [e('automates', t5, g2.sc2), e('verifies', t5, g1.ac3)],
+    supersessions: [...(opts.noReplace ? [] : [{ kind: 'node', old: g2.t2, new: t5, reason: why('paired test successor'), by }]), ...(opts.alsoSupersede ?? []).map((old) => ({ kind: 'node', old, new: null, reason: why(), by }))],
+    names: [{ cid: t5, slug: 't-5', by }],
+  };
+  return { records: [record], ids: { t5, name: 'read-the-success-message-from-the-status-region', definitionId: t.definitionId, body } };
 }
 
 /** A generated test file as Kane writes it, as a workspace-relative path and text (for the fake's writeFiles). */

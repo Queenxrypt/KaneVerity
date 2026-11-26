@@ -189,8 +189,13 @@ if (script.dynamic && argv[0] === 'context' && ['fsck', 'list', 'view', 'review'
 // (testrun_plan, and an unresolved_variables warning), computing unresolved variables
 // the way Kane's loader does: every *.json in .testmuai/variables/, alphabetically, a
 // later file winning; a variable is resolved only with a non-empty value. Without
-// --dry-run it "runs": script.testrun {mode: ok|hang, delayMs, exit, pack (file to copy into
-// .testmuai/evidence/), packName, mutateTest, appendRecord (intent verb)}.
+// --dry-run it "runs": script.testrun {mode: ok|hang, delayMs, exit, pack (the combined pack:
+// a file copied to .testmuai/evidence/<packId>.evidence), packId, testPackIds (one per test, in
+// argv order: Kane 0.10.5 also writes one pack per test and reports it as source_execution_id;
+// omitted = a single-pack run), mutateTest, appendRecord (intent verb)}.
+// Its output has the event shapes of Kane 0.10.5's real authoring run (2026-11-26). Faults:
+// memberStatus, overallStatus, events [{type, drop, duplicate, set: {dotted.path: value}}],
+// rawLines (appended as-is), skipPackFile, skipTestPack (index), extraPack (unreported file name).
 // ---------------------------------------------------------------------------
 if (argv[0] === 'testrun' && argv[1] === 'run') {
   const cfg = script.testrun || {};
@@ -232,10 +237,19 @@ if (argv[0] === 'testrun' && argv[1] === 'run') {
     fs.writeFileSync(path.join(dir, 'Result.md'), `# Result\n\n1. navigate {{app_url}}/ - passed\n2. click Developer Settings - passed\n3. click API Keys - passed\n4. click Generate Key - passed\n\nrecorded ${cfg.reauthor ? 'again' : 'once'} (${f})\n`);
     fs.writeFileSync(path.join(dir, '.internal', 'steps', '1-abcdef12', 'flows', '1', 'flow.json'), JSON.stringify({ step: 1, recordedAt: cfg.reauthor ? 'second' : 'first' }));
   }
-  if (cfg.pack) {
-    fs.mkdirSync(path.join(cwd, '.testmuai', 'evidence'), { recursive: true });
-    fs.copyFileSync(cfg.pack, path.join(cwd, '.testmuai', 'evidence', `${cfg.packName || 'run'}.evidence`));
-  }
+  const crypto = require('node:crypto');
+  const evDir = path.join(cwd, '.testmuai', 'evidence');
+  const packId = cfg.packId || crypto.randomUUID();
+  const testPackIds = Array.isArray(cfg.testPackIds) ? cfg.testPackIds : null;
+  fs.mkdirSync(evDir, { recursive: true });
+  // One pack per test first (as Kane writes them while each test ends), then the combined pack.
+  if (testPackIds) testPackIds.forEach((id, i) => {
+    if (cfg.skipTestPack !== i) fs.writeFileSync(path.join(evDir, `${id}.evidence`), `per-test pack ${i + 1} (synthetic)\n`);
+  });
+  // Written fresh, as Kane writes it during the run (copyFileSync would keep the source's time on
+  // Windows, and KaneVerity checks that every pack was written while the job ran).
+  if (cfg.pack && !cfg.skipPackFile) fs.writeFileSync(path.join(evDir, `${packId}.evidence`), fs.readFileSync(cfg.pack));
+  if (cfg.extraPack) fs.writeFileSync(path.join(evDir, cfg.extraPack), 'unreported pack (synthetic)\n');
   if (cfg.appendRecord) {
     const crypto = require('node:crypto');
     const ctx = path.join(cwd, '.context');
@@ -247,7 +261,52 @@ if (argv[0] === 'testrun' && argv[1] === 'run') {
     hashes[String(seq)] = `sha256:${hex}`;
     fs.writeFileSync(path.join(ctx, 'fake-hashes.json'), JSON.stringify(hashes));
   }
-  out({ type: 'testrun_summary', members: files.length, v: 1 });
+  // The run's structured output, in Kane 0.10.5's real event shapes (synthetic ids and paths).
+  const ms = cfg.memberStatus || 'passed';
+  const overall = cfg.overallStatus || 'passed';
+  const testId = (f) => `${path.basename(f).replace(/_test\.md$/, '').slice(0, 40)}-${crypto.createHash('sha256').update(f).digest('hex').slice(0, 8)}`;
+  const sessions = files.map(() => crypto.randomUUID());
+  const ts = () => new Date().toISOString();
+  const events = [{ type: 'stream_start', cli_version: '0.10.5', surface: 'testrun', pid: process.pid, v: 1, ts: ts() }, { type: 'testrun_plan', members: files.map((f) => ({ path: path.join(cwd, f), tags: [] })), valid: true, parallel: 1, v: 1, ts: ts() }];
+  files.forEach((f, i) => {
+    const log = path.join(cwd, '.testmuai', 'kaneai', 'sessions', sessions[i], 'events.ndjson');
+    events.push({ type: 'testrun_authored_member_start', path: path.join(cwd, f), session_id: sessions[i], log_path: log, v: 1, ts: ts() });
+    events.push({ type: 'testrun_authored_member_end', path: path.join(cwd, f), test_id: testId(f), status: ms, duration_s: 100 + i, session_id: sessions[i], log_path: log, v: 1, ts: ts() });
+  });
+  const passed = ms === 'passed' ? files.length : 0;
+  events.push({ type: 'testrun_evidence_ingest', status: 'ok', evidence_id: packId, v: 1, ts: ts() });
+  events.push({ type: 'coverage', status: 'written', computed_by: 'local', coverage_version: 2, scope: 'run', pct: 100, pack: path.join(evDir, `${packId}.evidence`), v: 1, ts: ts() });
+  events.push({
+    type: 'testrun_summary',
+    execution: { id: packId, status: overall, evidence_id: packId },
+    authored: files.map((f, i) => ({ path: path.join(cwd, f), test_id: testId(f), commit_id: sessions[i], execution_id: packId, ...(testPackIds ? { source_execution_id: testPackIds[i] } : {}), status: ms, published: 'yes' })),
+    totals: { tests: files.length, passed, failed: files.length - passed, broken: 0, skipped: 0, authored: files.length },
+    duration_s: 300,
+    upload: 'ok',
+    cancelled: false,
+    v: 1,
+    ts: ts(),
+  });
+  events.push({ type: 'testrun_done', execution_id: packId, overall_status: overall, coverage: { status: 'written', pct: 100 }, v: 1, ts: ts() });
+  // Faults: drop, duplicate or change events (dotted paths), then raw lines.
+  let shown = events;
+  for (const op of cfg.events || []) {
+    shown = shown.flatMap((e) => {
+      if (e.type !== op.type) return [e];
+      if (op.drop) return [];
+      const c = JSON.parse(JSON.stringify(e));
+      for (const [k, v] of Object.entries(op.set || {})) {
+        const keys = k.split('.');
+        let o = c;
+        for (const kk of keys.slice(0, -1)) o = o[kk] = o[kk] ?? {};
+        if (v === null) delete o[keys[keys.length - 1]];
+        else o[keys[keys.length - 1]] = v;
+      }
+      return op.duplicate ? [c, c] : [c];
+    });
+  }
+  for (const e of shown) out(e);
+  for (const l of cfg.rawLines || []) process.stdout.write(l + '\n');
   process.exit(cfg.exit ?? 0);
 }
 

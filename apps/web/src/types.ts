@@ -1,6 +1,7 @@
 // UI-side view of the orchestrator's public (allow-listed, scrubbed) records.
 // Core types are imported type-only from the orchestrator, so they can't drift.
 import type { Classification, Discovery, ExtractedItem, Project, RunState, SourceRef, Tutorial, VerificationStatus } from '../../orchestrator/src/types.ts';
+import type { RunPlan } from './runPlan.ts';
 
 export type { Classification, Discovery, ExtractedItem, Project, RunState, SourceRef, Tutorial, VerificationStatus };
 import type { Citation, CorrectionState, Edit, VerificationCheck } from '../../orchestrator/src/correct/store.ts';
@@ -409,12 +410,14 @@ export interface DesignRecordingView {
   at: string | null;
   ok: boolean;
   reason: string;
+  /** Whether the recording may be approved: the latest authoring run of this test, AUTHORED, with outcome evidence that meets the rules. */
+  evidence: { ok: boolean; reason: string; executionId: string | null };
 }
 export interface DesignExecutionView {
   executionId: string;
   phase: 'authoring' | 'verification';
   jobId: string | null;
-  state: 'started' | 'refused' | 'unknown' | 'finished' | 'reconciled';
+  state: 'started' | 'refused' | 'unknown' | 'finished' | 'reconciled' | 'rechecked';
   at: string;
   reason: string;
   verdict: 'AUTHORED' | 'VERIFIED' | 'NOT_VERIFIED' | null;
@@ -427,6 +430,28 @@ export interface DesignExecutionView {
   /** Kane is still running this run (it is watched, never reconciled). */
   kaneRunning: boolean;
   canReconcile: boolean;
+  /** Version of the post-run check that made this result (null before a result). */
+  checker: number | null;
+  /** The combined evidence pack that was verified, and the per-test packs Kane also wrote (file names). */
+  evidenceFile: string | null;
+  testPacks: string[];
+  members: DesignExecutionMemberView[];
+  kaneRun: { overallStatus: string | null; totals: { tests: number; passed: number; failed: number; broken: number; skipped: number } | null } | null;
+  /** On a re-check: the earlier result it replaced as current (kept in the history). */
+  recheckOf: { at: string; verdict: string; checker: number; problems: string[] } | null;
+  /** A free re-check with a newer checker version (Kane is not run); recheckReason says why not. */
+  canRecheck: boolean;
+  recheckReason: string;
+}
+export interface DesignExecutionMemberView {
+  outcome: string;
+  testSlug: string;
+  testFile: string;
+  kaneStatus: string | null;
+  durationS: number | null;
+  testPack: string | null;
+  packMemberStatus: string | null;
+  recording: { path: string; exists: boolean; sha256: string | null };
 }
 export interface DesignReviewResponse {
   tutorialId: string;
@@ -468,6 +493,9 @@ export interface DesignReviewResponse {
   execution?: DesignExecutionView | null;
   readiness?: { ready: boolean; items: { id: string; label: string; ok: boolean; reason: string }[] };
   verificationReadiness?: { ready: boolean; items: { id: string; label: string; ok: boolean; reason: string }[] };
+  /** The exact tests each paid run would give Kane now, and why it cannot start (the backend's selection). */
+  authoringPlan?: RunPlan;
+  verificationPlan?: RunPlan;
   recordings?: DesignRecordingView[];
   canReview?: boolean;
 }

@@ -30,7 +30,7 @@ import { findLeaks, scrub, scrubDeep } from '../verify/redact.ts';
 import { checkCitations, type CitationReport } from './citations.ts';
 import type { LineMapEntry } from './requirements.ts';
 import { isRedesignPhase, redesignAcknowledgement, type RedesignPhase, kaneUserFor, sourceIdFor } from './commands.ts';
-import { JOB_ID_PATTERN, jobStdoutPath, usedEvolve, type AssuranceJobs, type JobRecord } from './jobs.ts';
+import { JOB_ID_PATTERN, jobStdoutPath, usedCorrectiveEvolve, usedEvolve, type AssuranceJobs, type JobRecord } from './jobs.ts';
 import {
   blockingWrite,
   currentWrites,
@@ -732,7 +732,7 @@ export class AssuranceUseCases {
    * replace (nothing in progress, paused or unknown), then a fresh read and every design
    * condition (approved, verified in Kane, current requirements, the same logical id).
    */
-  async evolveChecks(tutorialId: string, cid: string) {
+  async evolveChecks(tutorialId: string, cid: string, opts: { corrective?: boolean } = {}) {
     if (!isTutorialId(tutorialId)) throw new AssuranceError(404, 'Tutorial not found.');
     this.refuseWhileWriting(tutorialId);
     return this.serial(`review:${tutorialId}`, async () => {
@@ -742,7 +742,12 @@ export class AssuranceUseCases {
       if (blocking) throw new AssuranceError(409, this.lockedMessage(blocking));
       const all = await this.designJobs(tutorialId, cid);
       const used = usedEvolve(all, cid);
-      if (used) throw new AssuranceError(409, `Not started: an evolve of this use case was already started (job ${used.jobId}, ${used.state}). KaneVerity starts one evolve per use-case version; another needs a separate, recorded decision.`);
+      // The one exception (section 13.13): the corrective evolve follows the one evolve, once.
+      if (opts.corrective) {
+        if (!used) throw new AssuranceError(409, "Not started: a corrective evolve follows only this use case's one evolve, and none was run.");
+        const again = usedCorrectiveEvolve(all, cid);
+        if (again) throw new AssuranceError(409, `Not started: the corrective evolve of this use case was already started (job ${again.jobId}, ${again.state}). There is one per use-case version.`);
+      } else if (used) throw new AssuranceError(409, `Not started: an evolve of this use case was already started (job ${used.jobId}, ${used.state}). KaneVerity starts one evolve per use-case version; another needs a separate, recorded decision.`);
       // A request KaneVerity refused before Kane started changed nothing: the design before it is what is evolved.
       const prev = this.previousDesignOf(all.find((j) => !(j.state === 'refused' && j.exitCode === null)));
       if (!prev.complete) this.refuseWithoutCompleteDesign(prev);

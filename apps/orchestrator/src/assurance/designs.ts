@@ -2,13 +2,15 @@
 // documentation, record KaneVerity's own review, approve the application URL value,
 // and show whether the design is ready for test execution.
 //
-// What B5 does NOT do: no Kane command except the free reads of a use-case retrieval
-// (B3: context fsck, list, view), no Kane review write, no design or redesign, no
-// browser test, and no change to anything Kane generated (.context, .testmuai,
-// including the variables file). Execution stays blocked: readiness has two gates
-// that are closed by design until they are built and validated on a real run
-// (Kane approval writes for criteria/scenarios/tests, and run-time assertion
-// evidence). See docs/ASSURANCE_PLAN.md section 13.
+// What it runs in Kane, each behind its own gates: the free reads of a use-case retrieval (B3:
+// context fsck, list, view), free approval writes of design items (context review), a free dry
+// run, and, only in Assurance mode "all" with an explicit paid confirmation, the authoring and
+// verification test runs, the one evolve and the one corrective evolve of a use-case version.
+// It never changes anything Kane generated (.context, .testmuai, including Kane's variables
+// file); it writes only its own run variables file. Evidence is judged after a run, from Kane's
+// structured output and its combined evidence pack; a recording is approved per test, and only
+// when its own recorded check meets the outcome evidence rules. See docs/ASSURANCE_PLAN.md
+// section 13 (13.12 and 13.13 for the real testrun format and the Phase A rules).
 //
 // Integrity rules:
 // - A design read is accepted only when the use-case retrieval it is based on passed
@@ -23,7 +25,7 @@
 //   shown as stale and needs an explicit acknowledgement that says so.
 
 import { createHash } from 'node:crypto';
-import { lstat, readdir, readFile, mkdir, writeFile } from 'node:fs/promises';
+import { lstat, readdir, readFile, mkdir, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { config, reviewerSetting } from '../config.ts';
 import { assertInstanceLock } from '../instanceLock.ts';
@@ -48,11 +50,12 @@ import {
   type TestItem,
 } from './designCheck.ts';
 import { DESIGN_EDGE_TYPES, DESIGN_LABELS, isLive, readDesignGraph, resolveSlug, type DesignGraph } from './designGraph.ts';
-import { buildArgs, CommandError, evolveAcknowledgement, evolveInstruction, kaneUserFor, type EvolveInputs, type EvolveScopePrint } from './commands.ts';
-import { jobStdoutPath, usedEvolve, type AssuranceJobs, type JobRecord } from './jobs.ts';
+import { buildArgs, CommandError, correctiveEvolveAcknowledgement, correctiveEvolveInstruction, evolveAcknowledgement, evolveInstruction, kaneUserFor, type CorrectiveInputs, type CorrectiveKeep, type EvolveInputs, type EvolveScopePrint } from './commands.ts';
+import { jobStdoutPath, usedCorrectiveEvolve, usedEvolve, type AssuranceJobs, type JobRecord } from './jobs.ts';
 import { MAX_REASON, type KaneWriteState } from './review.ts';
-import { requirementFor, verifyPack, type PackVerification } from './runEvidence.ts';
+import { readPackManifest, requirementFor, verifyPack, type PackVerification } from './runEvidence.ts';
 import { AssuranceError } from './service.ts';
+import { parseTestrunOutput } from './testrunOutput.ts';
 import { isTutorialId, readVersion } from './store.ts';
 import { UC_HEX, type AssuranceUseCases, type UseCaseSnapshot } from './usecases.ts';
 
@@ -659,15 +662,53 @@ export interface ExecutionTarget {
   definitionId: string;
 }
 
+/**
+ * Version of the post-run check (checkRun). A finished run's result records the version that
+ * made it; a free re-check is allowed only with a newer version, once per version.
+ * 1: one new evidence pack expected. 2: the combined pack Kane names in its output (Kane 0.10.5
+ * writes one pack per test plus a combined pack), with every association checked. 3: Kane's YAML
+ * anchors and aliases read (the real result.yaml writes each step's verifies list that way), the run
+ * kind read from each member, and subset authoring runs.
+ */
+export const RUN_CHECKER_VERSION = 3;
+
+/** One approved test in a run: its file, Kane's member, its per-test pack, its recording and its member in the combined pack. */
+export interface ExecutionMember {
+  outcome: string;
+  testSlug: string;
+  testCid: string;
+  testFile: string;
+  /** From Kane's output (testrun_summary.authored). */
+  kaneTestId: string | null;
+  kaneStatus: string | null;
+  durationS: number | null;
+  /** The per-test evidence pack Kane reported (file name), or null in a single-pack run. */
+  testPack: string | null;
+  /** The member folder in the combined pack with this test's definition id, and its status. */
+  packMember: string | null;
+  packMemberStatus: string | null;
+  recording: { path: string; sha256: string | null; exists: boolean; staging: boolean };
+}
+
 export interface ExecutionResult {
   /** AUTHORED: an authoring run that left a recording and changed nothing else. Never a verification. */
   verdict: 'AUTHORED' | 'VERIFIED' | 'NOT_VERIFIED';
   /** Recording trees after the run. */
   recordings: { path: string; sha256: string | null; exists: boolean; staging: boolean }[];
   mutation: string[];
+  /** The combined evidence pack that was verified (file name in .testmuai/evidence). */
   evidenceFile: string | null;
   verification: PackVerification | null;
   problems: string[];
+  /** Missing on results made before version 2 (they count as version 1). */
+  checker?: number;
+  /** Every pack the run left, as checked: the combined pack and the per-test packs (never changed or removed). */
+  packs?: { name: string; role: 'combined' | 'test'; sha256: string; bytes: number }[];
+  members?: ExecutionMember[];
+  /** What Kane's structured output reported (testrun_done, testrun_summary totals). */
+  kaneRun?: { overallStatus: string | null; totals: { tests: number; passed: number; failed: number; broken: number; skipped: number } | null } | null;
+  /** sha256 of Kane's saved output (the job's stdout.ndjson) when it was checked. */
+  outputSha256?: string | null;
 }
 
 /** One test run of the approved design. Append-only: every state change is a new entry. */
@@ -677,12 +718,15 @@ export interface ExecutionEntry {
   phase: 'authoring' | 'verification';
   jobId: string | null;
   at: string;
-  state: 'started' | 'refused' | 'unknown' | 'finished' | 'reconciled';
+  /** rechecked: a finished run's evidence checked again by a newer checker version (Kane not run). */
+  state: 'started' | 'refused' | 'unknown' | 'finished' | 'reconciled' | 'rechecked';
   reason: string;
   reviewer: string;
   readinessSha256: string;
+  /** On a re-check: the result it replaces as current (that entry stays in the log). */
+  recheckOf?: { at: string; state: string; verdict: string; checker: number; problems: string[] };
   targets: ExecutionTarget[];
-  pre: { testFiles: { path: string; sha256: string }[]; /** Superseded tests' files kept on disk (never run), as checked before the run. */ supersededFiles?: { path: string; sha256: string }[]; variables: { name: string; sha256: string }[]; recordings: { path: string; sha256: string | null; exists: boolean; staging: boolean }[]; storeRecords: number; storeTip: string | null; evidenceFiles: string[]; designSnapshot: number };
+  pre: { testFiles: { path: string; sha256: string }[]; /** The test files Kane was given (absent: all of testFiles). An authoring run may run only the tests without an approved, current recording; testFiles still fingerprints every live test. */ runFiles?: string[]; /** Superseded tests' files kept on disk (never run), as checked before the run. */ supersededFiles?: { path: string; sha256: string }[]; variables: { name: string; sha256: string }[]; recordings: { path: string; sha256: string | null; exists: boolean; staging: boolean }[]; storeRecords: number; storeTip: string | null; evidenceFiles: string[]; designSnapshot: number };
   result: ExecutionResult | null;
   by: 'kaneverity-design-review';
 }
@@ -712,6 +756,87 @@ export function currentDesignWrites(entries: DesignKaneWrite[]): DesignKaneWrite
   const m = new Map<string, DesignKaneWrite>();
   for (const e of entries) if (e.type === 'kane_write' && e.by === 'kaneverity-design-review') m.set(e.writeId, e);
   return [...m.values()];
+}
+
+const runCidsOf = (tests: { cid: string }[]) => new Set(tests.map((x) => x.cid));
+
+/** The test files an execution gave Kane (an authoring run may run fewer than it fingerprints). */
+export function runFilesOf(x: ExecutionEntry): string[] {
+  return x.pre.runFiles ?? x.pre.testFiles.map((f) => f.path);
+}
+
+/** The recording an execution's result shows for a test file it ran (null: not run, or not recorded). */
+function resultRecording(x: ExecutionEntry, file: string): ExecutionResult['recordings'][number] | null {
+  const i = x.pre.testFiles.findIndex((f) => f.path === file);
+  return i >= 0 && runFilesOf(x).includes(file) ? (x.result?.recordings[i] ?? null) : null;
+}
+
+/**
+ * May this test's current recording be approved (and does an approval of it still count)? Judged
+ * per test, from the latest authoring run that ran this exact test file, so a later run of other
+ * tests never replaces it, and a later failed run of this test does. That run must be AUTHORED,
+ * list this exact recording and test file, have been checked by the current checker version, and
+ * its own evidence for this test's outcome must pass the outcome rules (the same DOM rules a
+ * verification applies, except the replay requirement): a recording whose recorded check cannot
+ * verify is never approved, so no verification is paid for that is bound to fail.
+ */
+export function recordingProof(test: TestItem, execs: ExecutionEntry[]): { ok: boolean; reason: string; executionId: string | null; needsRecheck?: boolean } {
+  const no = (reason: string, executionId: string | null = null, needsRecheck = false) => ({ ok: false, reason, executionId, ...(needsRecheck ? { needsRecheck } : {}) });
+  if (!test.file || !test.recording?.exists) return no('no recording yet (run the authoring run first)');
+  if (test.recording.staging) return no('Kane is replacing the recording (output .staging present)');
+  const run = execs.filter((e) => e.phase === 'authoring' && !!e.result && runFilesOf(e).includes(test.file!.path)).pop() ?? null;
+  if (!run) return no('no checked authoring run of this test file produced it');
+  const r = run.result!;
+  if (r.verdict !== 'AUTHORED') return no(`the latest authoring run of this test (${run.executionId}) is ${r.verdict}`, run.executionId);
+  const rec = resultRecording(run, test.file.path);
+  if (!rec || rec.path !== test.recording.dir || rec.sha256 !== test.recording.sha256 || !rec.exists || rec.staging) return no(`the recording is not the one that run (${run.executionId}) produced (it changed since)`, run.executionId);
+  const pre = run.pre.testFiles.find((f) => f.path === test.file!.path);
+  if (!pre || pre.sha256 !== test.file.sha256) return no('the test file changed since that run', run.executionId);
+  const v = r.checker ?? 1;
+  if (v < RUN_CHECKER_VERSION) return no(`that run's evidence was checked by checker version ${v}; re-check it (free) with version ${RUN_CHECKER_VERSION} first`, run.executionId, true);
+  const tg = run.targets.find((x) => x.testCid === test.cid);
+  if (!tg) return no('that run did not run this test as approved', run.executionId);
+  const o = r.verification?.outcomes.find((x) => x.outcome === tg.outcome) ?? null;
+  if (!o?.verified) return no(`the recorded check of ${tg.outcome} does not meet the evidence rules (${o?.problems.join(' ') || 'no evidence for it'})`, run.executionId);
+  return { ok: true, reason: '', executionId: run.executionId };
+}
+
+/**
+ * The tests an authoring run records now, and why it cannot start (beyond the readiness gates).
+ * The one source of the selection: the job uses it when it starts, and the page shows it in the
+ * paid-run confirmation, so the two never differ. A test with an approved, current recording is
+ * not recorded again; a test whose recording only needs the free re-check refuses the run.
+ */
+export function authoringSelection<T extends { cid: string; slug: string | null }>(tests: T[], recordings: { testCid: string; slug: string | null; ok: boolean; recording: { exists: boolean } | null; proof: { needsRecheck?: boolean } }[]): { tests: T[]; refusal: string | null } {
+  const selected = tests.filter((x) => !recordings.find((r) => r.testCid === x.cid)?.ok);
+  if (!selected.length) return { tests: [], refusal: 'every test already has an approved, current recording, so nothing needs recording. Run the verification.' };
+  const ids = runCidsOf(selected);
+  const recheckFirst = recordings.filter((r) => ids.has(r.testCid) && r.proof.needsRecheck && r.recording?.exists);
+  if (recheckFirst.length) {
+    const one = recheckFirst.length === 1;
+    return { tests: selected, refusal: `${recheckFirst.map((r) => r.slug).join(', ')} already ${one ? 'has a recording' : 'have recordings'} from a run checked by an older checker version. Re-check that run (free) first, then review the recordings; Kane would record ${one ? 'it' : 'them'} again otherwise.` };
+  }
+  return { tests: selected, refusal: null };
+}
+
+/**
+ * Why an authoring run's confirmation no longer matches the tests it would record (null: it
+ * matches). The confirmed content ids are compared as a set with the backend's selection.
+ */
+export function selectionConflict(tests: { cid: string; slug: string | null }[], selected: { cid: string; slug: string | null }[], confirmed: string[]): string | null {
+  const now = selected.map((x) => x.cid).sort();
+  const asked = [...confirmed].sort();
+  if (JSON.stringify(now) === JSON.stringify(asked)) return null;
+  const name = (c: string) => tests.find((x) => x.cid === c)?.slug ?? `an unknown test (${c.slice(0, 19)}…)`;
+  return `the tests to record changed since this confirmation (confirmed: ${asked.map(name).sort().join(', ') || 'none'}; now: ${selected.map((x) => x.slug ?? name(x.cid)).sort().join(', ') || 'none'}). Nothing ran and no credits were used. Review the current list and confirm again.`;
+}
+
+/** What a checked run's result means, in one sentence (finished runs and re-checks). */
+export function executionReason(phase: ExecutionEntry['phase'], result: ExecutionResult): string {
+  const why = [...result.mutation, ...result.problems].join(' ') || 'see the outcomes.';
+  if (result.verdict === 'VERIFIED') return 'Every documented outcome has its own DOM-evidenced, passed assertion in a pure replay, and nothing was changed.';
+  if (result.verdict === 'AUTHORED') return 'Kane recorded the steps. Review each recording, approve it, run the dry run again, then run the verification. This run verifies nothing.';
+  return `${phase === 'authoring' ? 'Authoring failed' : 'Not verified'}: ${why}`;
 }
 
 /** Current state of each execution (last entry per executionId), oldest first. */
@@ -1022,6 +1147,7 @@ export class AssuranceDesigns {
     const evolveInstructions = (await this.jobs.list(t)).flatMap((j) => (j.params.kind === 'evolve' && j.params.ucCid === cid ? [j.params.instruction] : []));
     const snap = await assembleDesign({ ucSnap, ucCid: cid, graph, listStdout, viewStdout, workspaceDir: config.assurance.workspaceDir, number: n, evolveInstructions });
     snap.evolveScope = await this.evolveScopeFor(t, cid);
+    snap.correctiveKeep = await this.correctiveKeepFor(t, cid);
     await mkdir(snapDir(t), { recursive: true });
     await writeFile(path.join(snapDir(t), `snapshot-${pad(n)}.json`), JSON.stringify(snap, null, 2) + '\n', { encoding: 'utf8', flag: 'wx' });
     return snap;
@@ -1108,10 +1234,14 @@ export class AssuranceDesigns {
     const readiness = computeReadiness(base);
     // Verification readiness: additionally, every recording approved (exact recording and test
     // file, made by an AUTHORED run), and a passed dry run made after the last approval.
+    // Per test: its own decision (bound to its exact recording and test file) and its own proof
+    // (from the latest authoring run of that test), so recordings made by different runs count.
+    const execs = currentExecutions(log.executions);
     const recordings = snap.tests.map((x) => {
       const st = decisionStatus(entries, 'recording', x.cid, bindingFor('recording', x.cid, snap, ev, origin));
-      const why = !x.recording?.exists ? 'no recording yet (run the authoring run first)' : x.recording.staging ? 'Kane is replacing the recording (output .staging present)' : st.state === 'none' ? 'not reviewed' : st.stale ? 'the approval is stale (the recording or the test file changed)' : st.state !== 'approved' ? st.state : '';
-      return { testCid: x.cid, slug: x.slug, recording: x.recording ?? null, status: st, ok: !why, reason: why };
+      const proof = recordingProof(x, execs);
+      const why = !x.recording?.exists ? 'no recording yet (run the authoring run first)' : x.recording.staging ? 'Kane is replacing the recording (output .staging present)' : st.state === 'none' ? 'not reviewed' : st.stale ? 'the approval is stale (the recording or the test file changed)' : st.state !== 'approved' ? st.state : !proof.ok ? proof.reason : '';
+      return { testCid: x.cid, slug: x.slug, recording: x.recording ?? null, status: st, proof, ok: !why, reason: why };
     });
     const lastApproval = recordings.map((r) => r.status.at).filter((a): a is string => !!a).sort().pop() ?? null;
     const recOk = recordings.length > 0 && recordings.every((r) => r.ok);
@@ -1137,6 +1267,13 @@ export class AssuranceDesigns {
     // Kane is still running this run's job: it can be watched, never reconciled.
     const lastJob = lastExec?.jobId && lastExec.state === 'started' ? await this.jobs.get(lastExec.jobId).catch(() => null) : null;
     const kaneRunning = !!lastJob && (lastJob.state === 'queued' || lastJob.state === 'running');
+    const recheckWhy = lastExec && (lastExec.state === 'finished' || lastExec.state === 'rechecked') ? await this.recheckBlock(t, lastExec, execs) : 'Only a finished run can be re-checked.';
+    const res = lastExec?.result ?? null;
+    // What each paid run would run now, from the same selection the job uses when it starts.
+    const selection = authoringSelection(snap.tests, recordings);
+    const notReady = (items: { ok: boolean; label: string; reason: string }[]) => items.filter((x) => !x.ok).map((x) => `${x.label}: ${x.reason}`).join(' | ');
+    const authoringPlan = { tests: selection.tests.map((x) => ({ slug: x.slug, testCid: x.cid, testFile: x.file?.path ?? null })), available: readiness.ready && !selection.refusal, reason: !readiness.ready ? notReady(readiness.items) : (selection.refusal ?? '') };
+    const verificationPlan = { tests: snap.tests.map((x) => ({ slug: x.slug, testCid: x.cid, testFile: x.file?.path ?? null })), available: verificationReadiness.ready, reason: verificationReadiness.ready ? '' : notReady(verificationReadiness.items) };
     const pub = scrubDeep({
       ...base,
       design: {
@@ -1164,9 +1301,20 @@ export class AssuranceDesigns {
       dryRun: { ok: dryRun.ok, reason: dryRun.reason, current: dryRun.current, latest: dryRun.latest ? { id: dryRun.latest.id, at: dryRun.latest.at, state: dryRun.latest.state, reason: dryRun.latest.reason, unresolved: dryRun.latest.unresolved, files: dryRun.latest.files } : null },
       readiness,
       verificationReadiness,
-      recordings: recordings.map((x) => ({ testCid: x.testCid, slug: x.slug, dir: x.recording?.dir ?? null, exists: !!x.recording?.exists, staging: !!x.recording?.staging, sha256: x.recording?.sha256 ?? null, files: x.recording?.files ?? 0, resultMd: x.recording?.resultMd ?? null, state: x.status.state, stale: x.status.stale, at: x.status.at, ok: x.ok, reason: x.reason })),
+      authoringPlan,
+      verificationPlan,
+      recordings: recordings.map((x) => ({ testCid: x.testCid, slug: x.slug, dir: x.recording?.dir ?? null, exists: !!x.recording?.exists, staging: !!x.recording?.staging, sha256: x.recording?.sha256 ?? null, files: x.recording?.files ?? 0, resultMd: x.recording?.resultMd ?? null, state: x.status.state, stale: x.status.stale, at: x.status.at, ok: x.ok, reason: x.reason, evidence: { ok: x.proof.ok, reason: x.proof.reason, executionId: x.proof.executionId } })),
       execution: lastExec
-        ? { executionId: lastExec.executionId, phase: lastExec.phase, jobId: lastExec.jobId, state: lastExec.state, at: lastExec.at, reason: lastExec.reason, verdict: lastExec.result?.verdict ?? null, mutation: lastExec.result?.mutation ?? [], problems: lastExec.result?.problems ?? [], outcomes: lastExec.result?.verification?.outcomes ?? [], packOk: lastExec.result?.verification?.packOk ?? null, runKind: lastExec.result?.verification?.runKind ?? null, packProblems: lastExec.result?.verification?.problems ?? [], kaneRunning, canReconcile: lastExec.state === 'unknown' || (lastExec.state === 'started' && !kaneRunning && lastJob?.state !== 'complete' && !this.finishing.has(lastExec.jobId ?? '')) }
+        ? { executionId: lastExec.executionId, phase: lastExec.phase, jobId: lastExec.jobId, state: lastExec.state, at: lastExec.at, reason: lastExec.reason, verdict: lastExec.result?.verdict ?? null, mutation: lastExec.result?.mutation ?? [], problems: lastExec.result?.problems ?? [], outcomes: lastExec.result?.verification?.outcomes ?? [], packOk: lastExec.result?.verification?.packOk ?? null, runKind: lastExec.result?.verification?.runKind ?? null, packProblems: lastExec.result?.verification?.problems ?? [], kaneRunning, canReconcile: lastExec.state === 'unknown' || (lastExec.state === 'started' && !kaneRunning && lastJob?.state !== 'complete' && !this.finishing.has(lastExec.jobId ?? '')),
+            // What the run left, as checked (pack names, workspace-relative test paths, statuses; no logs or pack contents).
+            checker: res ? res.checker ?? 1 : null,
+            evidenceFile: res?.evidenceFile ?? null,
+            testPacks: (res?.packs ?? []).filter((p) => p.role === 'test').map((p) => p.name),
+            members: (res?.members ?? []).map((m) => ({ outcome: m.outcome, testSlug: m.testSlug, testFile: m.testFile, kaneStatus: m.kaneStatus, durationS: m.durationS, testPack: m.testPack, packMemberStatus: m.packMemberStatus, recording: { path: m.recording.path, exists: m.recording.exists, sha256: m.recording.sha256 } })),
+            kaneRun: res?.kaneRun ?? null,
+            recheckOf: lastExec.recheckOf ? { at: lastExec.recheckOf.at, verdict: lastExec.recheckOf.verdict, checker: lastExec.recheckOf.checker, problems: lastExec.recheckOf.problems } : null,
+            canRecheck: recheckWhy === null,
+            recheckReason: recheckWhy ?? '' }
         : null,
       canReview: snap.integrity.ok && freshOk && !busy && !!reviewer.label,
     });
@@ -1216,12 +1364,11 @@ export class AssuranceDesigns {
           if (!m.acCid || m.problem) throw new AssuranceError(409, `The mapping for ${target} cannot be approved: ${m.problem ?? 'no criterion matches it.'}`);
         }
         if (decision === 'approved' && kind === 'recording') {
-          // Only a recording the LATEST authoring run produced, that run AUTHORED, unchanged since,
-          // on the same test file. A later failed authoring run rewrote the folder: it does not count.
+          // Only a recording the latest authoring run of THIS test produced (AUTHORED, unchanged
+          // since, same test file), whose recorded check meets the outcome evidence rules.
           const tf = snap.tests.find((x) => x.cid === target)!;
-          const latest = currentExecutions(log.executions).filter((e) => e.phase === 'authoring' && e.result).pop();
-          const made = [latest].filter((e) => !!e && e.result!.verdict === 'AUTHORED').find((e) => e!.result!.recordings.some((r) => r.path === tf.recording!.dir && r.sha256 === tf.recording!.sha256 && r.exists && !r.staging) && e!.pre.testFiles.some((p) => p.path === tf.file!.path && p.sha256 === tf.file!.sha256));
-          if (!made) throw new AssuranceError(409, 'This recording was not produced by the latest authoring run (AUTHORED) on this exact test file (or it changed since). It cannot be approved.');
+          const proof = recordingProof(tf, currentExecutions(log.executions));
+          if (!proof.ok) throw new AssuranceError(409, `This recording cannot be approved: ${proof.reason}.`);
           if (!tf.recording!.resultMd) throw new AssuranceError(409, "Kane's Result.md is missing from the recording, so its steps cannot be reviewed.");
         }
         if (decision === 'approved' && kind === 'test') {
@@ -1437,9 +1584,11 @@ export class AssuranceDesigns {
    */
   async evolve(tutorialId: unknown, ucHex: unknown, body: unknown): Promise<JobRecord> {
     const { t, cid } = this.params(tutorialId, ucHex);
-    const b = (body && typeof body === 'object' ? body : {}) as { confirm?: unknown; acknowledgement?: unknown; instruction?: unknown; because?: unknown };
+    const b = (body && typeof body === 'object' ? body : {}) as { confirm?: unknown; acknowledgement?: unknown; instruction?: unknown; because?: unknown; corrective?: unknown };
     // Only KaneVerity's own instruction is ever passed: a request that brings its own text is refused.
     if (b.instruction !== undefined || b.because !== undefined) throw new AssuranceError(400, "The evolve instruction is built by KaneVerity from the approved requirements; a request cannot supply one.");
+    if (b.corrective !== undefined && b.corrective !== true) throw new AssuranceError(400, 'corrective must be true when given.');
+    if (b.corrective === true) return this.correctiveEvolve(t, cid, b);
     const words = evolveAcknowledgement(cid);
     if (b.acknowledgement !== words) throw new AssuranceError(400, `An evolve needs this exact acknowledgement in "acknowledgement": "${words}"`);
     // Checked before any Kane read, so a refused request costs nothing.
@@ -1473,6 +1622,58 @@ export class AssuranceDesigns {
       const scope = await this.scopePrint();
       if (scope.problems?.length) throw new AssuranceError(409, `Not started: what the evolve must not change cannot be fingerprinted cleanly: ${scope.problems.join(' ')}`);
       return this.jobs.startEvolve({ tutorialId: t, ucCid: cid, useCase: gate.ucNow.logicalId, reviewer: gate.reviewer, decisionId: gate.decisionId, inputs, instruction, acknowledgement: words, scope, requirements: gate.fresh.requirements, confirm: b.confirm });
+    });
+  }
+
+  /**
+   * B5: the one corrective evolve of this use-case version (section 13.13; paid: mode "all", the
+   * paid confirmation and its own exact acknowledgement, which names the tests it replaces). It is
+   * the only exception to "one evolve per use-case version", and only after that evolve completed
+   * and passed its check, the recording review approved the tests to keep (with their proof) and
+   * rejected the ones to replace. Every gate and fingerprint of a plain evolve applies, plus what it
+   * must keep: exact content ids, the kept tests' files and every recording.
+   */
+  private async correctiveEvolve(t: string, cid: string, b: { confirm?: unknown; acknowledgement?: unknown }): Promise<JobRecord> {
+    const slugs = await this.rejectedRecordings(t, cid);
+    if (!slugs.length) throw new AssuranceError(409, 'Not started: no recording is rejected, so there is nothing for a corrective evolve to replace.');
+    const words = correctiveEvolveAcknowledgement(cid, slugs);
+    if (b.acknowledgement !== words) throw new AssuranceError(400, `A corrective evolve needs this exact acknowledgement in "acknowledgement": "${words}"`);
+    // Checked before any Kane read, so a refused request costs nothing.
+    if (config.assurance.mode !== 'all') throw new AssuranceError(403, 'A corrective evolve uses Kane credits, so it needs Assurance mode "all". Nothing was started.');
+    const paidOk = !!b.confirm && typeof b.confirm === 'object' && (b.confirm as { paid?: unknown }).paid === true;
+    if (!paidOk) throw new AssuranceError(400, 'A corrective evolve uses Kane credits. Confirm it explicitly ({"confirm": {"paid": true}}).');
+    return this.serial(`design:${t}`, async () => {
+      const jobs = await this.jobs.list(t);
+      const first = usedEvolve(jobs, cid);
+      const firstCheck = first ? (await this.log(t)).evolveChecks.filter((x) => x.jobId === first.jobId).pop() : undefined;
+      if (!first || first.state !== 'complete' || !firstCheck || firstCheck.problems.length) throw new AssuranceError(409, `Not started: a corrective evolve follows only this use case's one evolve, completed and checked with no problems${first ? ` (job ${first.jobId} is ${first.state}${firstCheck ? `, ${firstCheck.problems.length} problems` : ', not checked'})` : ' (none was run)'}.`);
+      const again = usedCorrectiveEvolve(jobs, cid);
+      if (again) throw new AssuranceError(409, `Not started: the corrective evolve of this use case was already started (job ${again.jobId}, ${again.state}). There is one per use-case version.`);
+      const own = await this.ownBusy(t);
+      if (own) throw new AssuranceError(409, `Not started: ${own}`);
+      const gate = await this.usecases.evolveChecks(t, cid, { corrective: true });
+      const snap = await this.retrieveLocked(t, cid);
+      if (!snap.integrity.ok) throw new AssuranceError(409, `Not started: the design read failed its integrity checks (${snap.integrity.problems.join(' ')}).`);
+      if (!snap.requirements || !gate.fresh.requirements || snap.requirements.reqSha256 !== gate.fresh.requirements.reqSha256) throw new AssuranceError(409, 'Not started: the design read and the use-case read do not name the same requirements.');
+      const bad = (why: string) => new AssuranceError(409, `Not started: ${why}`);
+      const why = { reason: '' };
+      const inputs = await this.evolveInputsFrom(t, cid, snap, gate.ucNow.logicalId, why);
+      if (!inputs) throw bad(why.reason);
+      const corrective = await this.correctiveFrom(t, cid, snap, gate.ucNow.logicalId, why);
+      if (!corrective) throw bad(why.reason);
+      // The acknowledgement names the tests this exact read replaces.
+      if (correctiveEvolveAcknowledgement(cid, corrective.inputs.replace.map((r) => r.test)) !== words) throw bad('the rejected recordings changed since the acknowledgement was given.');
+      let instruction: string;
+      try {
+        instruction = correctiveEvolveInstruction(corrective.inputs);
+      } catch (err) {
+        if (err instanceof CommandError) throw bad(err.message);
+        throw err;
+      }
+      this.guard();
+      const scope = await this.scopePrint();
+      if (scope.problems?.length) throw new AssuranceError(409, `Not started: what the evolve must not change cannot be fingerprinted cleanly: ${scope.problems.join(' ')}`);
+      return this.jobs.startEvolve({ tutorialId: t, ucCid: cid, useCase: gate.ucNow.logicalId, reviewer: gate.reviewer, decisionId: gate.decisionId, inputs, instruction, acknowledgement: words, scope, corrective, requirements: gate.fresh.requirements, confirm: b.confirm });
     });
   }
 
@@ -1517,6 +1718,60 @@ export class AssuranceDesigns {
   }
 
   /**
+   * The corrective evolve's inputs and what it must keep, from a design read and KaneVerity's
+   * recording decisions (section 13.13). Every live test must have a current recording decision:
+   * a rejection (to replace) or an approval with its proof (to keep, exactly). Null with the
+   * reason when the design does not allow it.
+   */
+  private async correctiveFrom(t: string, cid: string, snap: DesignSnapshot, useCase: string, why: { reason: string }): Promise<{ inputs: CorrectiveInputs; keep: CorrectiveKeep } | null> {
+    const no = (r: string) => {
+      why.reason = r;
+      return null;
+    };
+    const r = await this.readinessFor(t, cid);
+    if (!r || r.snap.snapshot !== snap.snapshot) return no('the design read changed while the corrective evolve was being prepared.');
+    const req = r.requirements;
+    if (req.steps.length !== 3 || req.steps.some((x) => x.labels.length !== 1)) return no('the requirements do not have exactly three documented steps with one label each.');
+    if ([...snap.acs, ...snap.scenarios, ...snap.tests].some((x) => !x.slug) || snap.tests.some((x) => !x.file || !x.recording?.exists)) return no('a live item has no short id, or a live test has no file or recording.');
+    const replace: CorrectiveInputs['replace'] = [];
+    const kept: TestItem[] = [];
+    for (const x of snap.tests) {
+      const rec = r.recordings.find((y) => y.testCid === x.cid)!;
+      if (rec.status.state === 'rejected' && !rec.status.stale) {
+        const o = r.ev.outcomes.find((y) => y.testCid === x.cid);
+        const sc = snap.scenarios.find((s) => x.automates.includes(s.cid));
+        const ro = o ? req.outcomes.find((q) => q.item === o.outcome) : undefined;
+        if (!o?.acSlug || !sc?.slug || !ro) return no(`the rejected test ${x.slug} is not tied to exactly one outcome, criterion and scenario.`);
+        const requirement = requirementFor(ro.text, ro.labels);
+        if (requirement !== 'baseline_change' && ro.labels.length !== 1) return no(`${ro.item} needs exactly one documented value.`);
+        replace.push({ test: x.slug!, scenario: sc.slug, outcome: o.outcome, criterion: o.acSlug, requirement, label: requirement === 'baseline_change' ? null : ro.labels[0] });
+      } else if (rec.ok) kept.push(x);
+      else return no(`every test needs a current recording decision first: ${x.slug} is ${rec.reason || rec.status.state} (approve the recordings to keep, reject the ones to replace).`);
+    }
+    if (!replace.length) return no('no recording is rejected, so there is nothing to correct.');
+    if (!kept.length) return no('no test has an approved recording to keep; a corrective evolve keeps at least one test as it is.');
+    replace.sort((a, b) => a.test.localeCompare(b.test));
+    const pick = (xs: { slug: string | null; cid: string }[]) => xs.map((x) => ({ slug: x.slug!, cid: x.cid })).sort((a, b) => a.slug.localeCompare(b.slug));
+    const keep: CorrectiveKeep = {
+      criteria: pick(snap.acs),
+      scenarios: pick(snap.scenarios),
+      tests: pick(kept),
+      rejected: pick(snap.tests.filter((x) => replace.some((y) => y.test === x.slug))),
+      testFiles: kept.map((x) => ({ path: x.file!.path, sha256: x.file!.sha256 })).sort((a, b) => a.path.localeCompare(b.path)),
+      recordings: snap.tests.map((x) => ({ testFile: x.file!.path, dir: x.recording!.dir, sha256: x.recording!.sha256 })).sort((a, b) => a.dir.localeCompare(b.dir)),
+    };
+    const inputs: CorrectiveInputs = { useCase, steps: [req.steps[0].labels[0], req.steps[1].labels[0], req.steps[2].labels[0]], replace, keep: { criteria: keep.criteria.map((x) => x.slug), scenarios: keep.scenarios.map((x) => x.slug), tests: keep.tests.map((x) => x.slug) } };
+    return { inputs, keep };
+  }
+
+  /** The tests the recording review rejected (current decisions), from the latest design read; no Kane read. */
+  private async rejectedRecordings(t: string, cid: string): Promise<string[]> {
+    const r = await this.readinessFor(t, cid);
+    if (!r) return [];
+    return r.recordings.filter((x) => x.status.state === 'rejected' && !x.status.stale).map((x) => x.slug!).filter(Boolean).sort();
+  }
+
+  /**
    * The last check before Kane is spawned for an evolve (called by the job runner after the design
    * preflight). Fails closed; never changes the job:
    * - the job equals its record on disk (parameters and arguments);
@@ -1539,7 +1794,8 @@ export class AssuranceDesigns {
       return `its arguments are not valid any more (${(err as Error).message})`;
     }
     if (canonical(rebuilt) !== canonical(j.args)) return 'its stored arguments are not exactly what its parameters give.';
-    if (p.acknowledgement !== evolveAcknowledgement(p.ucCid)) return 'the acknowledgement is not the exact words for this use-case version.';
+    const expectedAck = p.corrective ? correctiveEvolveAcknowledgement(p.ucCid, p.corrective.inputs.replace.map((r) => r.test)) : evolveAcknowledgement(p.ucCid);
+    if (p.acknowledgement !== expectedAck) return 'the acknowledgement is not the exact words for this use-case version.';
     const snap = await this.latest(p.tutorialId, p.ucCid).catch(() => null);
     if (!snap || !snap.integrity.ok) return 'there is no integrity-checked design read of this use case.';
     if (snap.ucSlug !== p.useCase) return `the design read names the use case ${snap.ucSlug ?? 'nothing'}, not ${p.useCase}.`;
@@ -1554,7 +1810,14 @@ export class AssuranceDesigns {
     if (canonical(inputs) !== canonical(p.inputs)) return 'the instruction inputs from a fresh read of the store differ from the stored ones.';
     let fresh: string;
     try {
-      fresh = evolveInstruction(inputs);
+      if (p.corrective) {
+        // The corrective evolve: its inputs and what it must keep, rebuilt from this read and the
+        // recording decisions, must be exactly the stored ones (same tests, ids, files, recordings).
+        const again = await this.correctiveFrom(p.tutorialId, p.ucCid, snap, p.useCase, why);
+        if (!again) return why.reason;
+        if (canonical(again) !== canonical(p.corrective)) return 'what the corrective evolve replaces or keeps, rebuilt from a fresh read, differs from the stored one.';
+        fresh = correctiveEvolveInstruction(again.inputs);
+      } else fresh = evolveInstruction(inputs);
     } catch (err) {
       return (err as Error).message;
     }
@@ -1616,21 +1879,66 @@ export class AssuranceDesigns {
         cmp('Documentation file', p.scope.docs, now.docs, false);
         cmp('Test file', p.scope.testFiles, now.testFiles, true);
       }
+      if (p.corrective) {
+        // The corrective evolve keeps exactly what it said: every recording as it was (the rejected
+        // ones are preserved too), the kept items live with the same content ids, and the rejected
+        // tests superseded. Kept test files are covered above (no existing test file may change).
+        const k = p.corrective.keep;
+        const ws = config.assurance.workspaceDir;
+        for (const r of k.recordings) {
+          const now = await recordingTree(ws, r.testFile).catch(() => null);
+          if (!now || now.dir !== r.dir || !now.exists || now.staging || now.sha256 !== r.sha256) problems.push(`The recording ${r.dir} changed; a corrective evolve keeps every recording as it is.`);
+        }
+        for (const f of k.testFiles) if (!(p.scope?.testFiles ?? []).some((x) => x.path === f.path && x.sha256 === f.sha256)) problems.push(`The kept test file ${f.path} was not fingerprinted before the run.`);
+        const g = await readDesignGraph(path.join(ws, '.context'), null);
+        // Without Kane's view, only the last record's full hash is unknown (the next design read
+        // establishes it through `context view`); every other problem counts.
+        const tipOnly = `The full hash of record ${g.records.length} could not be established.`;
+        for (const x of g.problems) if (x !== tipOnly) problems.push(`The store after the run: ${x}`);
+        for (const x of [...k.criteria, ...k.scenarios, ...k.tests]) {
+          if (!g.nodes.has(x.cid)) problems.push(`${x.slug} (${x.cid.slice(0, 19)}…) is not in the store after the run.`);
+          else if (g.supersededNodes.has(x.cid)) problems.push(`${x.slug} was superseded, but the corrective evolve had to keep it exactly as it is.`);
+        }
+        for (const x of k.rejected) if (!g.supersededNodes.has(x.cid)) problems.push(`${x.slug} was not replaced.`);
+      }
       await this.appendTo(t, 'evolveChecks', { jobId: j.jobId, at: new Date().toISOString(), jobState: j.state, late, problems });
     });
   }
 
   /** The latest evolve of this use case that Kane ran, with its check (null: none). */
   private async evolveScopeFor(t: string, cid: string): Promise<DesignSnapshot['evolveScope']> {
-    const used = usedEvolve(await this.jobs.list(t), cid);
-    if (!used) return null;
-    // Wait for this process's own end-of-run check if it is still running; if the evolve has ended
-    // and no check was ever recorded (it failed, or the orchestrator stopped first), record one now,
-    // marked late (same lock and once-per-job guard as the start-up recovery).
-    await this.updating.get(used.jobId);
-    if (used.state !== 'queued' && used.state !== 'running' && !(await this.log(t)).evolveChecks.some((x) => x.jobId === used.jobId)) await this.checkEvolve(used, true);
-    const c = (await this.log(t)).evolveChecks.filter((x) => x.jobId === used.jobId).pop();
-    return { jobId: used.jobId, checked: !!c, late: c?.late ?? false, problems: c?.problems ?? [] };
+    // Every evolve Kane ran for this use case (the one evolve and, if any, the corrective one): each
+    // must have been checked, and any problem in any of them blocks the design.
+    const jobs = await this.jobs.list(t);
+    const used = [usedEvolve(jobs, cid), usedCorrectiveEvolve(jobs, cid)].filter((x): x is JobRecord => !!x);
+    if (!used.length) return null;
+    const out = { jobId: used[used.length - 1].jobId, checked: true, late: false, problems: [] as string[] };
+    for (const u of used) {
+      // Wait for this process's own end-of-run check if it is still running; if the evolve has ended
+      // and no check was ever recorded (it failed, or the orchestrator stopped first), record one now,
+      // marked late (same lock and once-per-job guard as the start-up recovery).
+      await this.updating.get(u.jobId);
+      if (u.state !== 'queued' && u.state !== 'running' && !(await this.log(t)).evolveChecks.some((x) => x.jobId === u.jobId)) await this.checkEvolve(u, true);
+      const c = (await this.log(t)).evolveChecks.filter((x) => x.jobId === u.jobId).pop();
+      if (!c) out.checked = false;
+      if (c?.late) out.late = true;
+      for (const p of c?.problems ?? []) out.problems.push(u.jobId === out.jobId ? p : `(job ${u.jobId}) ${p}`);
+    }
+    return out;
+  }
+
+  /**
+   * The content ids a corrective evolve kept from an earlier generation (section 13.13): only when
+   * it ended, was checked, and its check found no problem. B5 then accepts exactly these items as
+   * live though they were made before the latest generation; nothing else is exempted.
+   */
+  private async correctiveKeepFor(t: string, cid: string): Promise<string[] | null> {
+    const c = usedCorrectiveEvolve(await this.jobs.list(t), cid);
+    if (!c || c.params.kind !== 'evolve' || !c.params.corrective || c.state !== 'complete') return null;
+    const check = (await this.log(t)).evolveChecks.filter((x) => x.jobId === c.jobId).pop();
+    if (!check || check.problems.length) return null;
+    const k = c.params.corrective.keep;
+    return [...k.criteria, ...k.scenarios, ...k.tests].map((x) => x.cid);
   }
 
   /** A free dry run of the approved tests' exact files (fresh design read first). */
@@ -1713,35 +2021,68 @@ export class AssuranceDesigns {
     if (config.assurance.mode !== 'all') throw new AssuranceError(403, 'Running the tests uses Kane credits, so it needs Assurance mode "all". Nothing was started.');
     const paidOk = !!b.confirm && typeof b.confirm === 'object' && (b.confirm as { paid?: unknown }).paid === true;
     if (!paidOk) throw new AssuranceError(400, 'Running the tests uses Kane credits. Confirm it explicitly ({"confirm": {"paid": true}}).');
+    // An authoring run is bound to the exact tests the person confirmed (the page's list, from the
+    // view's authoringPlan): their content ids, each once, in any order. Checked here for shape, and
+    // against the backend's own fresh selection right before the run is recorded and Kane starts.
+    let confirmedTests: string[] | null = null;
+    if (phase === 'authoring') {
+      const ct = (b.confirm as { tests?: unknown }).tests;
+      if (!Array.isArray(ct) || ct.length > 20 || ct.some((x) => typeof x !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(x)) || new Set(ct).size !== ct.length) throw new AssuranceError(400, 'An authoring run needs the exact tests you confirmed: {"confirm": {"paid": true, "tests": ["<test content id>", ...]}}, each once, as the page lists them. Nothing was started.');
+      confirmedTests = ct as string[];
+    }
     const reviewer = reviewerSetting();
     if (!reviewer.label) throw new AssuranceError(409, reviewer.problem ?? 'No reviewer is set.');
     return this.serial(`design:${t}`, async () => {
       const busy = await this.busy(t);
       if (busy) throw new AssuranceError(409, `Not started: ${busy}`);
+      // First against the latest design read, which is what the page's list came from: a changed
+      // selection is refused before any Kane process starts (not even the free reads below).
+      if (phase === 'authoring' && confirmedTests) {
+        const shown = await this.readinessFor(t, cid);
+        if (shown) {
+          const sel = authoringSelection(shown.snap.tests, shown.recordings);
+          const conflict = sel.refusal ? null : selectionConflict(shown.snap.tests, sel.tests, confirmedTests);
+          if (conflict) throw new AssuranceError(409, `Not started (authoring): ${conflict}`);
+        }
+      }
       await this.retrieveLocked(t, cid);
       const r = (await this.readinessFor(t, cid))!;
       const gates = phase === 'verification' ? r.verificationReadiness : r.readiness;
       if (!gates.ready) throw new AssuranceError(409, `Not started (${phase}): ${gates.items.filter((x) => !x.ok).map((x) => `${x.label}: ${x.reason}`).join(' | ')}`);
       const { snap, ev } = r;
-      const targets: ExecutionTarget[] = ev.outcomes.map((o) => {
+      // Which tests Kane runs: a verification always replays every approved test; an authoring run
+      // records only the tests without an approved, current recording (one approved and kept is
+      // never recorded again). Every live test is still fingerprinted before and after the run.
+      const selection = authoringSelection(snap.tests, r.recordings);
+      if (phase === 'authoring' && selection.refusal) throw new AssuranceError(409, `Not started (authoring): ${selection.refusal}`);
+      // The confirmation must name exactly the tests this run would record now (order does not matter).
+      if (phase === 'authoring' && confirmedTests) {
+        const conflict = selectionConflict(snap.tests, selection.tests, confirmedTests);
+        if (conflict) throw new AssuranceError(409, `Not started (authoring): ${conflict}`);
+      }
+      const runTests = phase === 'verification' ? snap.tests : selection.tests;
+      const runCids = new Set(runTests.map((x) => x.cid));
+      const targets: ExecutionTarget[] = ev.outcomes.filter((o) => runCids.has(o.testCid!)).map((o) => {
         const tst = snap.tests.find((x) => x.cid === o.testCid)!;
         const req = r.requirements.outcomes.find((x) => x.item === o.outcome)!;
         return { outcome: o.outcome, outcomeText: o.outcomeText, labels: req.labels, acCid: o.acCid!, acSlug: o.acSlug!, testCid: tst.cid, testSlug: tst.slug ?? '', definitionId: tst.definitionId ?? '', requirement: requirementFor(o.outcomeText, req.labels) };
       });
       const files = snap.tests.map((x) => x.file!.path).sort();
+      const runFiles = runTests.map((x) => x.file!.path).sort();
+      if (targets.length !== runTests.length) throw new AssuranceError(409, 'Not started: the tests to run and the documented outcomes they verify are not one-to-one.');
       const kept = (snap.supersededTestFiles ?? []).map((f) => f.path).sort();
       const disk = await this.diskFingerprints(files, kept);
       for (const f of snap.supersededTestFiles ?? []) if (disk.supersededFiles.find((d) => d.path === f.path)?.sha256 !== f.sha256) throw new AssuranceError(409, `Not started: the superseded test file ${f.path} changed since the checks. Read the design again.`);
-      const pre: ExecutionEntry['pre'] = { testFiles: disk.testFiles, supersededFiles: disk.supersededFiles, variables: disk.variables, recordings: disk.recordings, storeRecords: snap.store.records, storeTip: snap.store.tipHash, evidenceFiles: await this.evidenceFiles(), designSnapshot: snap.snapshot };
+      const pre: ExecutionEntry['pre'] = { testFiles: disk.testFiles, runFiles, supersededFiles: disk.supersededFiles, variables: disk.variables, recordings: disk.recordings, storeRecords: snap.store.records, storeTip: snap.store.tipHash, evidenceFiles: await this.evidenceFiles(), designSnapshot: snap.snapshot };
       // A verification run replays exactly the approved recordings, unchanged since the design read.
       if (phase === 'verification') for (const rec of disk.recordings) if (!rec.exists || rec.staging || !snap.tests.some((x) => x.recording?.dir === rec.path && x.recording.sha256 === rec.sha256)) throw new AssuranceError(409, `Not started: the recording ${rec.path} is missing or changed since the checks.`);
       const readinessSha256 = sha256(canonical({ phase, pre: { ...pre, evidenceFiles: undefined }, targets, decisions: r.statuses.map((s) => s.status.entryId), writes: r.kaneApprovals.map((k) => k.write?.writeId ?? null), dryRun: r.dryRun.latest?.id ?? null }));
-      const started: ExecutionEntry = { executionId: newExecutionId(), phase, jobId: null, at: new Date().toISOString(), state: 'started', reason: phase === 'authoring' ? 'Starting the authoring run (Kane records the steps; this run cannot verify anything).' : 'Starting the verification run (a pure replay of the approved recordings).', reviewer: reviewer.label!, readinessSha256, targets, pre, result: null, by: 'kaneverity-design-review' };
+      const started: ExecutionEntry = { executionId: newExecutionId(), phase, jobId: null, at: new Date().toISOString(), state: 'started', reason: phase === 'authoring' ? `Starting the authoring run of ${runTests.map((x) => x.slug).join(', ')} (Kane records the steps; this run cannot verify anything).` : 'Starting the verification run (a pure replay of the approved recordings).', reviewer: reviewer.label!, readinessSha256, targets, pre, result: null, by: 'kaneverity-design-review' };
       this.guard();
       await this.appendTo(t, 'executions', started);
       let job: JobRecord;
       try {
-        job = await this.jobs.startTestRun({ tutorialId: t, ucCid: cid, files, reviewer: reviewer.label!, readinessSha256, requirements: snap.requirements, confirm: b.confirm });
+        job = await this.jobs.startTestRun({ tutorialId: t, ucCid: cid, files: runFiles, reviewer: reviewer.label!, readinessSha256, requirements: snap.requirements, confirm: b.confirm });
       } catch (err) {
         const refused: ExecutionEntry = { ...started, at: new Date().toISOString(), state: 'refused', reason: `Kane was not started: ${scrub((err as Error).message)}` };
         await this.appendTo(t, 'executions', refused);
@@ -1772,6 +2113,7 @@ export class AssuranceDesigns {
     if (canonical(disk.variables) !== canonical(x.pre.variables)) return 'a variables file changed since the checks.';
     if (canonical(disk.allTests) !== canonical([...x.pre.testFiles.map((f) => f.path), ...(x.pre.supersededFiles ?? []).map((f) => f.path)].sort())) return 'the set of test files in the workspace changed (a run could select a file that was not checked).';
     if (canonical(disk.recordings) !== canonical(x.pre.recordings)) return 'a recording changed since the checks.';
+    if (canonical([...p.files].sort()) !== canonical(runFilesOf(x))) return 'the test files given to Kane are not the ones the checks were made for.';
     return null;
   }
 
@@ -1803,10 +2145,8 @@ export class AssuranceDesigns {
           await this.appendTo(t, 'executions', { ...x, at: new Date().toISOString(), state: 'unknown', reason: `The run did not finish normally (${j.reason}). Its outcome is unknown; it is never re-run automatically. Reconcile it to check what it left.` });
           return;
         }
-        const result = await this.checkRun(x);
-        const why = [...result.mutation, ...result.problems].join(' ') || 'see the outcomes.';
-        const reason = result.verdict === 'VERIFIED' ? 'Every documented outcome has its own DOM-evidenced, passed assertion in a pure replay, and nothing was changed.' : result.verdict === 'AUTHORED' ? 'Kane recorded the steps. Review each recording, approve it, run the dry run again, then run the verification. This run verifies nothing.' : `${x.phase === 'authoring' ? 'Authoring failed' : 'Not verified'}: ${why}`;
-        await this.appendTo(t, 'executions', { ...x, at: new Date().toISOString(), state: 'finished', reason, result });
+        const result = await this.checkRun(t, x, j);
+        await this.appendTo(t, 'executions', { ...x, at: new Date().toISOString(), state: 'finished', reason: executionReason(x.phase, result), result });
       });
     } finally {
       this.finishing.delete(id);
@@ -1814,7 +2154,7 @@ export class AssuranceDesigns {
   }
 
   /** Post-execution verification: no mutation, a valid pack, and independent evidence for every outcome. */
-  private async checkRun(x: ExecutionEntry): Promise<ExecutionResult> {
+  private async checkRun(t: string, x: ExecutionEntry, job: JobRecord | null): Promise<ExecutionResult> {
     const mutation: string[] = [];
     const problems: string[] = [];
     const ws = config.assurance.workspaceDir;
@@ -1828,6 +2168,14 @@ export class AssuranceDesigns {
       const now = disk.recordings.find((d) => d.path === rec.path);
       if (!now || now.sha256 !== rec.sha256 || now.staging) mutation.push(`The recording ${rec.path} changed during the run (Kane re-recorded steps).`);
     }
+    // An authoring run of some tests leaves every other test's recording exactly as it was.
+    const runFiles = runFilesOf(x);
+    x.pre.testFiles.forEach((f, i) => {
+      if (runFiles.includes(f.path)) return;
+      const before = x.pre.recordings[i];
+      const now = disk.recordings[i];
+      if (!before || !now || canonical(before) !== canonical(now)) mutation.push(`The recording ${before?.path ?? now?.path ?? f.path} changed during the run, though its test was not in the run.`);
+    });
     // The store: only execution records may be added, chained to the tip the run started from.
     const commits = (await readdir(path.join(ws, '.context', 'commits')).catch(() => [] as string[])).filter((f) => /^[0-9]{6}-[a-f0-9]{12}\.json$/.test(f)).sort();
     if (commits.length < x.pre.storeRecords) mutation.push('Records disappeared from the store.');
@@ -1840,25 +2188,158 @@ export class AssuranceDesigns {
         mutation.push(`Record ${f} cannot be read.`);
       }
     }
-    // Exactly one new evidence pack.
+    // Kane's structured output names the combined pack and every per-test pack (Kane 0.10.5
+    // writes one pack per test plus one combined pack). The pack is never guessed from the folder.
+    const files = runFiles;
+    const evDir = path.join(ws, '.testmuai', 'evidence');
+    let stdout: string | null = null;
+    if (!job || job.jobId !== x.jobId) problems.push('The run has no job record bound to it.');
+    else {
+      stdout = await readFile(jobStdoutPath(job.jobId), 'utf8').catch(() => null);
+      if (stdout === null) problems.push("Kane's saved output for this run cannot be read.");
+    }
+    const outputSha256 = stdout === null ? null : createHash('sha256').update(stdout).digest('hex');
+    const report = stdout === null ? null : parseTestrunOutput(stdout, { workspaceDir: ws, files });
+    if (report) problems.push(...report.problems);
     const after = await this.evidenceFiles();
     const added = after.filter((n) => !x.pre.evidenceFiles.includes(n));
+    const packs: NonNullable<ExecutionResult['packs']> = [];
     let verification: PackVerification | null = null;
-    if (added.length !== 1) problems.push(added.length === 0 ? 'The run left no new evidence pack.' : `The run left ${added.length} evidence packs; exactly one was expected.`);
-    else {
+    let evidenceFile: string | null = null;
+    let manifest: ReturnType<typeof readPackManifest> | null = null;
+    if (report?.ok && job) {
+      const before = problems.length;
+      const expected = [report.packFile!, ...report.testPacks];
+      for (const n of expected) if (!added.includes(n)) problems.push(x.pre.evidenceFiles.includes(n) ? `The evidence pack ${n} that Kane reported existed before the run.` : `The evidence pack ${n} that Kane reported is not in the evidence folder.`);
+      for (const n of added) if (!expected.includes(n)) problems.push(`The run left an evidence pack Kane did not report (${n}).`);
+      // Every pack was written while this run's job ran (not before it started, not after it ended).
+      const from = Date.parse(job.startedAt ?? '') - 2000;
+      const to = (job.finishedAt ? Date.parse(job.finishedAt) : Date.now()) + 2000;
+      let combined: Buffer | null = null;
+      for (const n of expected.filter((e) => added.includes(e))) {
+        const s = await stat(path.join(evDir, n)).catch(() => null);
+        const b = s?.isFile() ? await readFile(path.join(evDir, n)).catch(() => null) : null;
+        if (!s || !b) {
+          problems.push(`The evidence pack ${n} cannot be read.`);
+          continue;
+        }
+        if (!(s.mtimeMs >= from && s.mtimeMs <= to)) problems.push(`The evidence pack ${n} was not written during this run's job.`);
+        packs.push({ name: n, role: n === report.packFile ? 'combined' : 'test', sha256: createHash('sha256').update(b).digest('hex'), bytes: b.length });
+        if (n === report.packFile) combined = b;
+      }
       const origin = await this.appOrigin();
-      const buf = await readFile(path.join(ws, '.testmuai', 'evidence', added[0])).catch(() => null);
-      if (!buf || !origin) problems.push('The evidence pack or the project URL cannot be read.');
-      else verification = verifyPack(buf, { appOrigin: origin, pinnedVersion: config.assurance.pinnedVersion, targets: x.targets, requireReplay: x.phase === 'verification' });
+      if (problems.length === before && (!combined || !origin)) problems.push('The evidence pack or the project URL cannot be read.');
+      if (problems.length === before && combined && origin) {
+        // The combined pack itself: Kane's run id, exactly the per-test packs it was merged from,
+        // and exactly one member per approved test (by definition id).
+        manifest = readPackManifest(combined);
+        problems.push(...manifest.problems);
+        if (manifest.runId !== report.evidenceId) problems.push('The combined pack does not carry the run id Kane reported (run.yaml run_id).');
+        const merged = [...(manifest.mergedFrom ?? [])].sort();
+        const reported = report.testPacks.map((n) => n.replace(/\.evidence$/, '')).sort();
+        if (JSON.stringify(merged) !== JSON.stringify(reported)) problems.push(reported.length ? 'The combined pack was not merged from exactly the per-test packs Kane reported (run.yaml merged_from).' : 'The pack lists packs it was merged from, but Kane reported no per-test packs.');
+        for (const tg of x.targets) {
+          const n = manifest.members.filter((m) => m.definitionId === tg.definitionId).length;
+          if (n !== 1) problems.push(n === 0 ? `The combined pack has no member for test ${tg.testSlug}.` : `The combined pack has ${n} members for test ${tg.testSlug}.`);
+        }
+        if (manifest.members.some((m) => !x.targets.some((tg) => tg.definitionId === m.definitionId))) problems.push('The combined pack has a member that is not one of the approved tests.');
+        if (manifest.members.length !== x.targets.length) problems.push(`The combined pack has ${manifest.members.length} members; ${x.targets.length} tests were approved.`);
+        if (problems.length === before) {
+          evidenceFile = report.packFile;
+          verification = verifyPack(combined, { appOrigin: origin, pinnedVersion: config.assurance.pinnedVersion, targets: x.targets, requireReplay: x.phase === 'verification' });
+        }
+      }
     }
+
+    // Each approved test, end to end: the design read's test file, Kane's member, its per-test
+    // pack, its recording (same order as the files) and its member in the combined pack.
+    const members: ExecutionMember[] = [];
+    const snap = await readJson<DesignSnapshot>(path.join(snapDir(t), `snapshot-${pad(x.pre.designSnapshot)}.json`)).catch(() => null);
+    if (!snap) problems.push('The design read this run was checked against cannot be read.');
+    else {
+      for (const tg of x.targets) {
+        const test = snap.tests.find((s) => s.cid === tg.testCid);
+        const file = test?.file?.path ?? null;
+        const i = file && files.includes(file) ? x.pre.testFiles.findIndex((f) => f.path === file) : -1;
+        if (!test || !file || i < 0) {
+          problems.push(`Test ${tg.testSlug} is not one of the files this run was given.`);
+          continue;
+        }
+        if (test.file!.sha256 !== x.pre.testFiles[i].sha256) problems.push(`Test ${tg.testSlug}'s file is not the one the design read checked.`);
+        const km = report?.ok ? report.members.find((m) => m.path === file) ?? null : null;
+        const pm = manifest?.members.filter((m) => m.definitionId === tg.definitionId) ?? [];
+        members.push({ outcome: tg.outcome, testSlug: tg.testSlug, testCid: tg.testCid, testFile: file, kaneTestId: km?.testId ?? null, kaneStatus: km?.status ?? null, durationS: km?.durationS ?? null, testPack: km?.sourcePack ?? null, packMember: pm.length === 1 ? pm[0].name : null, packMemberStatus: pm.length === 1 ? pm[0].status : null, recording: disk.recordings[i] });
+      }
+      if (new Set(members.map((m) => m.testFile)).size !== members.length || members.length !== files.length || new Set(x.targets.map((tg) => tg.testCid)).size !== x.targets.length) problems.push('The approved tests and the files this run was given are not one-to-one.');
+    }
+
+    // Kane's own result: every test passed, nothing failed or broke.
+    const passed = !!report?.ok && report.overallStatus === 'passed' && !!report.totals && report.totals.failed === 0 && report.totals.broken === 0 && report.members.every((m) => m.status === 'passed') && members.length > 0 && members.every((m) => m.packMemberStatus === 'passed');
+    if (report?.ok && !passed && evidenceFile) problems.push(`Kane did not report every test as passed (overall status: ${report.overallStatus ?? 'missing'}).`);
     const clean = mutation.length === 0 && problems.length === 0;
     let verdict: ExecutionResult['verdict'];
     if (x.phase === 'authoring') {
       // An authoring run never verifies. It is AUTHORED only if it left a complete recording per test.
-      for (const rec of disk.recordings) if (!rec.exists || rec.staging) problems.push(`No complete recording at ${rec.path} after the authoring run.`);
-      verdict = clean && problems.length === 0 && !!verification?.packOk ? 'AUTHORED' : 'NOT_VERIFIED';
-    } else verdict = clean && !!verification?.verified && verification.runKind === 'replay' ? 'VERIFIED' : 'NOT_VERIFIED';
-    return { verdict, mutation, evidenceFile: added.length === 1 ? added[0] : null, verification, problems, recordings: disk.recordings };
+      x.pre.testFiles.forEach((f, i) => {
+        const rec = disk.recordings[i];
+        if (runFiles.includes(f.path) && (!rec || !rec.exists || rec.staging)) problems.push(`No complete recording at ${rec?.path ?? f.path} after the authoring run.`);
+      });
+      verdict = clean && problems.length === 0 && passed && !!verification?.packOk ? 'AUTHORED' : 'NOT_VERIFIED';
+    } else verdict = clean && passed && !!verification?.verified && verification.runKind === 'replay' ? 'VERIFIED' : 'NOT_VERIFIED';
+    return { verdict, mutation, evidenceFile, verification, problems, recordings: disk.recordings, checker: RUN_CHECKER_VERSION, packs, members, kaneRun: report?.ok ? { overallStatus: report.overallStatus, totals: report.totals } : null, outputSha256 };
+  }
+
+  /** Why a run cannot be re-checked now (cheap checks only), or null when it can. */
+  private async recheckBlock(t: string, x: ExecutionEntry, execs: ExecutionEntry[]): Promise<string | null> {
+    if (execs[execs.length - 1]?.executionId !== x.executionId) return 'Only the latest run can be re-checked.';
+    if ((x.state !== 'finished' && x.state !== 'rechecked') || !x.result) return 'Only a finished run with a result can be re-checked.';
+    // A VERIFIED result is never re-checked. An AUTHORED one may be, by a newer checker: version 3
+    // is the first that reads Kane 0.10.5's real result.yaml, so an earlier AUTHORED result has no
+    // usable outcome evidence for the recording review (its re-check can only confirm or fail it).
+    if (x.result.verdict === 'VERIFIED') return 'This run is already VERIFIED.';
+    if (x.result.verdict === 'AUTHORED' && x.phase !== 'authoring') return 'Only an authoring run can be AUTHORED.';
+    const v = x.result.checker ?? 1;
+    if (v >= RUN_CHECKER_VERSION) return `This run's evidence was already checked by the current checker (version ${v}). A re-check needs a newer checker version.`;
+    if (!x.jobId) return 'The run has no job.';
+    const job = await this.jobs.get(x.jobId).catch(() => null);
+    if (!job) return "The run's job record cannot be read.";
+    if (job.kind !== 'testrun' || job.state !== 'complete' || (job.exitCode !== 0 && job.exitCode !== 1)) return `The run's job did not complete normally (${job.state}, exit ${job.exitCode ?? 'none'}).`;
+    const busy = await this.busy(t);
+    if (busy) return busy;
+    return null;
+  }
+
+  /**
+   * Check a finished run's evidence again with a newer checker version. Kane is not run and the
+   * job is not changed: it reads the job's saved output, the packs it left and the recordings,
+   * bound to the fingerprints saved when the run was checked. Allowed once per checker version.
+   * Refused, with nothing recorded, when anything the run left or depended on has changed.
+   */
+  async recheckExecution(tutorialId: unknown, ucHex: unknown, executionId: unknown): Promise<ExecutionEntry> {
+    const { t } = this.params(tutorialId, ucHex);
+    if (typeof executionId !== 'string' || !/^x[0-9]{8}-[0-9]{6}-[a-f0-9]{6}$/.test(executionId)) throw new AssuranceError(404, 'Test run not found.');
+    const reviewer = reviewerSetting();
+    if (!reviewer.label) throw new AssuranceError(409, reviewer.problem ?? 'No reviewer is set.');
+    return this.serial(`design:${t}`, async () => {
+      const execs = currentExecutions((await this.log(t)).executions);
+      const x = execs.find((e) => e.executionId === executionId);
+      if (!x) throw new AssuranceError(404, 'Test run not found.');
+      const block = await this.recheckBlock(t, x, execs);
+      if (block) throw new AssuranceError(409, `Not re-checked: ${block}`);
+      const job = (await this.jobs.get(x.jobId!))!;
+      const prior = x.result!;
+      const result = await this.checkRun(t, x, job);
+      // Bound to what was saved when the run was checked: nothing it left may have changed.
+      const drift: string[] = [...result.mutation];
+      if (canonical(result.recordings) !== canonical(prior.recordings)) drift.push('A recording changed since the run was checked.');
+      if (prior.outputSha256 && result.outputSha256 !== prior.outputSha256) drift.push("Kane's saved output changed since the run was checked.");
+      for (const p of prior.packs ?? []) if (result.packs?.find((q) => q.name === p.name)?.sha256 !== p.sha256) drift.push(`The evidence pack ${p.name} changed since the run was checked.`);
+      if (drift.length) throw new AssuranceError(409, `Not re-checked (nothing was recorded): ${drift.join(' ')}`);
+      const e: ExecutionEntry = { ...x, at: new Date().toISOString(), state: 'rechecked', reason: `Re-checked from what the run left (checker version ${RUN_CHECKER_VERSION}); Kane was not run again. ${executionReason(x.phase, result)}`, result, recheckOf: { at: x.at, state: x.state, verdict: prior.verdict, checker: prior.checker ?? 1, problems: prior.problems } };
+      this.guard();
+      await this.appendTo(t, 'executions', e);
+      return e;
+    });
   }
 
   /** Settle a run that ended without a known result: check what it left. It is never run again. */
@@ -1869,11 +2350,9 @@ export class AssuranceDesigns {
       const x = currentExecutions((await this.log(t)).executions).find((e) => e.executionId === executionId);
       if (!x) throw new AssuranceError(404, 'Test run not found.');
       if (x.state !== 'unknown' && x.state !== 'started') throw new AssuranceError(409, 'Only a run without a known result can be reconciled.');
-      if (x.jobId) {
-        const job = await this.jobs.get(x.jobId).catch(() => null);
-        if (job && (job.state === 'queued' || job.state === 'running')) throw new AssuranceError(409, 'Kane is still running these tests.');
-      }
-      const result = await this.checkRun(x);
+      const job = x.jobId ? await this.jobs.get(x.jobId).catch(() => null) : null;
+      if (job && (job.state === 'queued' || job.state === 'running')) throw new AssuranceError(409, 'Kane is still running these tests.');
+      const result = await this.checkRun(t, x, job);
       // A run that did not finish normally is never VERIFIED, whatever it left.
       const final: ExecutionResult = { ...result, verdict: 'NOT_VERIFIED', problems: [...result.problems, 'The run did not finish normally, so its result cannot be accepted as VERIFIED.'] };
       const e: ExecutionEntry = { ...x, at: new Date().toISOString(), state: 'reconciled', reason: 'Reconciled: what the run left was checked. It was not run again.', result: final };

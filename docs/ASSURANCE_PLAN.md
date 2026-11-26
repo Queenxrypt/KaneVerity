@@ -769,7 +769,8 @@ is VERIFIED without it.
   - only `execution` records were added to the store (an `exec-supersede`, a node, a supersession
     or a review is a mutation).
 - **The pack:**
-  - exactly one new pack in `.testmuai/evidence/`;
+  - ~~exactly one new pack in `.testmuai/evidence/`~~ (wrong for a real run; corrected in 13.12:
+    the combined pack Kane names in its output, with every per-test pack accounted for);
   - `run.yaml` `status: finalized`, producer `kane-cli 0.10.5`;
   - every surface and step URL on the application origin.
 - **Each outcome independently:**
@@ -842,7 +843,9 @@ only.
 1. **Authoring run** (paid; the pre-execution gates of 13.8): Kane records each approved test.
    - The best result is **AUTHORED**, never VERIFIED, even with complete evidence.
    - AUTHORED needs no mutation, a valid pack, and every recording present with no staging
-     folder. Otherwise it is NOT_VERIFIED ("Authoring failed: …").
+     folder. Otherwise it is NOT_VERIFIED ("Authoring failed: …"). Since 13.12 it also needs
+     Kane's structured output to report every test as passed, and the pack is the combined pack
+     Kane names.
 2. **Recording review** (KaneVerity decision, kind `recording`): the page shows Kane's
    `Result.md` and the recording's fingerprint.
    - An approval is accepted only when the **latest** authoring run was AUTHORED, its result
@@ -1142,3 +1145,263 @@ plain design and the generic jobs API, and not used up by a request refused befo
 records, requirements, documentation and existing test files changed or removed by an evolve all
 blocked, and a late check after a restart; tampering between enqueue and execution (instruction, acknowledgement, arguments, the store) refused before Kane is spawned; changed or deleted store blobs; the protected walk with deep nesting, unreadable entries, symbolic links (a real junction) and unexpected entries; a late check found by a design read, recorded once; no duplicate checks across reads and start-up. `assurance-design-check.test.ts`: which supersession
 reasons are recognised.
+
+### 13.12 The real authoring run, four evidence packs, and the free re-check (built 2026-11-26; the re-check not run)
+
+**The run (approved by the user):** job `j20261126-112315-2666b1`, execution
+`x20261126-112315-3549ed`, phase `authoring`, 11:23:15 to 11:31:37 UTC, exit 0, 115.4 credits
+(measured; balance 10,914.8574 to 10,799.4605). Kane's output: t-2, t-4 and t-3 each `passed`
+(205 s, 112 s, 101 s), `overall_status: passed`, coverage 100%. Kane added store records #23 to
+#25 (execution records only) and one recording folder per test. KaneVerity's check (version 1)
+returned NOT_VERIFIED: "The run left 4 evidence packs; exactly one was expected." It never
+reached the pack verifier.
+
+**What Kane 0.10.5 actually writes for a run of N tests.** This comes from the saved NDJSON (ids
+and statuses only) and a structural inspection of the combined pack (member names and YAML key
+names, no values):
+
+- N + 1 packs in `.testmuai/evidence/`: one per test, then one combined pack.
+- The combined pack is named, with one id, in `testrun_evidence_ingest.evidence_id`,
+  `testrun_summary.execution.id` and `.evidence_id`, `testrun_done.execution_id`, and
+  `coverage.pack` (`<workspace>/.testmuai/evidence/<id>.evidence`).
+- `testrun_summary.authored[]` gives, per test: `path`, `test_id`, `execution_id` (the combined
+  id), `source_execution_id` (its per-test pack) and `status`.
+- The combined pack's `run.yaml`: `run_id` (the combined id), `merged_from` (exactly the three
+  per-test pack ids), `status: finalized`, producer `kane-cli 0.10.5`, `totals`, and
+  `environment.run_kind_observed`. There is no `environment.run_kind` and no `surfaces`.
+- `tests/<member>/` for all three tests, each with `result.yaml` (its `definition_id` matches
+  exactly one approved test), `auteur/execution.json`, `logs/<n>-actions.ndjson`, step folders
+  and `test.md`. Each `result.yaml` has `environment.run_kind` and an `external_id` block that
+  holds account details (never read or shown by KaneVerity).
+
+**Root cause:** `checkRun` (`designs.ts`) counted new `.evidence` files and required exactly one.
+The test-run job's outcome came from the exit code only, and Kane's saved output was never read.
+The fake Kane wrote one pack and an unrealistic `testrun_summary`, so every test passed.
+
+**The fix (checker version 2, `RUN_CHECKER_VERSION`):**
+
+- **The output.** `testrunOutput.ts` (pure) parses the saved output. It fails closed on:
+  - any line that is not a JSON event;
+  - a missing or repeated `testrun_plan`, `testrun_evidence_ingest`, `coverage`,
+    `testrun_summary` or `testrun_done`;
+  - an id that is not a UUID, or ids that disagree;
+  - an ingest that is not `ok`, or `cancelled` not false;
+  - incomplete totals, or a test count that differs;
+  - a `coverage` pack that is not `<workspace>/.testmuai/evidence/<id>.evidence`;
+  - per-test packs reported for some tests only, twice, or with the combined id;
+  - plan members, member ends or summary entries that are not exactly the approved files (once
+    each, inside the workspace, with a consistent status and test id).
+
+  It returns only ids, workspace-relative test paths and statuses.
+- **The packs.** `checkRun` requires the new packs to be exactly the combined pack plus the
+  reported per-test packs: none missing, none extra, none existing before the run. Each must be
+  written while the job ran (file time within its start and end, with 2 s slack). It records each
+  pack's sha256 and size.
+- **The combined pack** (`readPackManifest`, `runEvidence.ts`): `run_id` must be Kane's id, and
+  `merged_from` exactly the reported per-test packs (absent in a single-pack run). It must hold
+  exactly one member per approved test by `definition_id`, and no other member. Only then is it
+  passed to the unchanged `verifyPack`.
+- **Each approved test, end to end.** The link goes through the write-once design read the run
+  was checked against (`pre.designSnapshot`). It covers the test file (its sha256 equal to the
+  pre-run fingerprint), Kane's member (status, test id, duration), the per-test pack, the
+  recording (same order as the files) and the member in the combined pack. The mapping must be
+  one-to-one.
+- **Kane's own result.** AUTHORED and VERIFIED also need `overall_status: passed`, no failed or
+  broken test, and every member and every pack member `passed`.
+- **Single-pack runs.** A run with no `source_execution_id` and no `merged_from` is still
+  accepted.
+- **Nothing is deleted, moved or rewritten:** every pack, recording, test file, store record and
+  job stays as it is.
+
+**Free re-check** (`POST /api/assurance/designs/:t/:ucHex/executions/:id/recheck`, reviewer set,
+no body):
+
+- **When it is allowed.** All of these must hold:
+  - it is the latest run, in state `finished` (or `rechecked`), with verdict NOT_VERIFIED (since
+    13.13 also an AUTHORED authoring result from an older checker; never a VERIFIED one);
+  - its result was made by an older checker version;
+  - its job is a `testrun` in state `complete`, with exit 0 or 1;
+  - nothing is active or unresolved (`busy`).
+- **What it does.** It runs `checkRun` again on the same execution and job: the job's saved
+  output, the packs, the recordings, the test files, the variables and the store records. Kane is
+  not started, no credits are used, and the job record and its output are not changed.
+- **Bound to what was saved.** It is refused with nothing recorded (409) if:
+  - the mutation checks find any change since the run;
+  - the recordings differ from the fingerprints saved in the result;
+  - for results of version 2 and later, the saved output's sha256 or a pack's sha256 changed.
+- **What it records.** Otherwise one entry is appended: `state: rechecked`, the new result, and
+  `recheckOf` with the earlier verdict, checker version and problems. The original entry stays in
+  the history. The new result counts as the latest authoring result, so its recordings can then
+  be approved.
+- **Once per checker version.** A re-check whose result is still NOT_VERIFIED cannot be repeated
+  with the same version (409). Only a newer checker version, with its own review, opens it again.
+- **API and UI.** The view adds `checker`, `evidenceFile`, `testPacks`, `members`, `kaneRun`,
+  `recheckOf`, `canRecheck` and `recheckReason`, scrubbed and leak-checked like the rest. The
+  Design Review page shows the members table and a "Re-check this run's evidence (free)" button
+  with a confirmation.
+
+**Known gap, as first reported (corrected in 13.13):** this section first reported that the real
+`result.yaml` had no `assert` steps and a 6-character `verifies` tag on the last click step. That
+was wrong: both were artefacts of KaneVerity's YAML reader, which did not understand the anchors
+and aliases Kane writes (`verifies: &ref_0`, `verifies: *ref_0`). It read the anchor as a string
+and silently stopped reading the steps list there. The run kind finding (`run_kind_observed` in
+`run.yaml`) was right; 13.13 reads it from the members.
+
+**Tests:**
+
+- `assurance-testrun-output.test.ts`: the real four-pack shape, the single-pack shape, a failed
+  run, and every fail-closed case above.
+- `assurance-run-evidence.test.ts`: the manifest (run id, `merged_from`, members), and malformed
+  and unreadable packs.
+- `assurance-design-execution.test.ts`, where the fake Kane now prints the real event shapes:
+  - A four-pack authoring run is AUTHORED, with each test tied to its file, pack and recording,
+    and every pack kept unchanged. Recording approval and a four-pack verification (VERIFIED)
+    follow.
+  - Fail-closed runs: a missing `testrun_done`, a missing combined or per-test pack, an unreported
+    pack, four packs with none reported per test, a wrong `run_id`, a wrong `merged_from`, a
+    missing member, a failed test, a malformed line, and a pack that existed before the run.
+  - The re-check is refused with nothing recorded after a recording or test-file change. It is
+    then AUTHORED with no Kane call and no credit entry, the job, output and packs unchanged, and
+    the original result kept. It cannot be repeated.
+  - A failed re-check is recorded and cannot be repeated.
+
+The existing single-pack tests still pass.
+
+### 13.13 Phase A: the real evidence format, per-test recordings, selective authoring, the corrective evolve (built 2026-11-26; nothing run)
+
+**What the recording review found (2026-11-26).** The three recordings of the authoring run are
+complete and unchanged. t-4 (O3) reads `"2 keys"` with `innerText` from
+`data-testid="api-key-count"`. t-3 (O1) checks a yes/no answer on an element found by the asserted
+text, not the `role=status` region AcmeDesk renders it in. t-2 (O2) reads the list in full before
+the click, but afterwards only a yes/no answer and a count, with the baseline copied into its code
+as a fixed value. The recommendation: approve t-4, reject t-2 and t-3.
+
+**The real Kane 0.10.5 evidence format** (read-only structural inspection of the combined pack, and
+Kane's merge code; no values printed):
+
+- Each member's `result.yaml` has the asserting documentation step split into `click`, `analyze`
+  and `assert` steps, each with `verifies: [ac-x]`. js-yaml writes the list once with an anchor
+  (`verifies: &ref_0` and the list on the next lines) and refers to it with aliases
+  (`verifies: *ref_0`). Wait steps have no `kind`.
+- `logs/<n>-actions.ndjson` holds the `analyze` action (key, `code_js`, locators, output) and the
+  `assert` action (`assertion_tree`). `auteur/execution.json` operations carry `operation_id` (the
+  step's `action_id`), `command: ASSERTION`, `assertion_status` and `assertion_tree`.
+- Merging, Kane moves `run.yaml`'s `environment.run_kind` to `run_kind_observed` and writes each
+  member's class into its `result.yaml` `environment.run_kind` (adding `run_kind_observed` there
+  when they differ).
+- Read with anchors expanded, KaneVerity's unchanged outcome rules give exactly the recording
+  review's verdicts on the real pack: O3 verified, O1 and O2 rejected.
+
+**Built (checker version 3):**
+
+1. **YAML anchors and aliases** (`runEvidence.ts`). Supported: block maps and lists, flow lists of
+   plain scalars, plain, single- and double-quoted scalars, and anchors with aliases on map values
+   and list items. An alias is a copy. Everything else throws `YamlError`, and the pack readers
+   report the file as unreadable (a pack problem): merge keys, tags, block scalars, flow maps,
+   complex keys, document markers, unknown, early or repeated anchors, tab indentation,
+   unexpected indentation (the old silent truncation), duplicate keys, lines that are not
+   `key: value`, comments after values, plain values containing `": "`, quoted or nested flow
+   lists, and escapes JSON does not have.
+2. **Run kind from the members.** A combined pack is a replay only when every member's
+   `environment.run_kind` is `replay`; `run_kind_observed` (if present) must agree; `run.yaml`
+   must not carry both `run_kind` and `run_kind_observed`; a member classed one way and observed
+   another, a member without a run kind and an unknown kind all fail closed. The single-pack
+   layout still reads `run.yaml`'s `run_kind`.
+3. **Outcome-evidence gate at recording approval** (`recordingProof`). A recording can be approved
+   only if the latest authoring run of that test is AUTHORED, lists this exact recording and test
+   file, was checked by the current checker version, and its own evidence for the test's outcome
+   passes the outcome rules (`verified` on that outcome in its pack verification). The same proof
+   is part of verification readiness, and the view shows it per recording (`evidence`).
+4. **Recordings per test.** The proof comes from the latest authoring run that ran this test's
+   file (`pre.runFiles`), so a later run of other tests never replaces it, and a later run of the
+   same test does.
+5. **Selective authoring.** An authoring run gives Kane only the tests without an approved, current
+   recording (refused when there are none); its targets are those tests' outcomes. `pre.testFiles`
+   still fingerprints every live test; `pre.runFiles` is what Kane was given (checked again right
+   before Kane starts). After the run, every other test's recording must be unchanged (a change is
+   a mutation). It is refused while a test it would record already has a recording from a run
+   checked by an older checker version: a free re-check comes first, so no recording is paid for
+   again (this protects the real run's t-4). A verification always runs every test.
+6. **The corrective evolve** (`POST …/evolve` with `"corrective": true`; paid; exact
+   acknowledgement: "I approve one corrective evolve of use case <12 hex> with KaneVerity's
+   instruction: Kane replaces only <tests> with new tests, keeps every other item exactly as it is,
+   and no record is deleted."):
+   - Only after this use case's one evolve completed and its check found no problem; once per
+     use-case version; never a plain evolve, design or redesign afterwards (those rules are
+     unchanged).
+   - Every live test needs a current recording decision: rejected ones are replaced, approved ones
+     (with their proof) are kept. At least one of each.
+   - KaneVerity's two-sentence instruction (`correctiveEvolveInstruction`) names each rejected test
+     with its own scenario and criterion, and what its new asserting step must read: the `role=status`
+     region's exact text (a message), the element's exact text (a value), or the full list again
+     after the action with every baseline key kept and exactly one new key asserted by value (a
+     change). It asks for a new title per test, so the original file and recording are never
+     overwritten, and to keep every other criterion, scenario and test exactly.
+   - Before Kane starts: the plain evolve's checks (job record on disk, arguments rebuilt, store and
+     requirements unchanged since the read), plus the corrective inputs and keep list rebuilt from
+     a fresh read and the current decisions, which must be exactly the stored ones.
+   - After it ends (recorded once, like every evolve check): no existing store record, blob,
+     requirements file, documentation file or test file changed; every recording (kept and
+     rejected) unchanged; every kept criterion, scenario and test still in the store and not
+     superseded; every rejected test superseded.
+   - Only a corrective evolve that ended and passed that check lets B5 accept live items from an
+     earlier generation, and only those it kept, by exact content id (noted, never silent).
+7. **Checker version 3** allows one more free re-check, now also of an AUTHORED authoring result
+   from an older checker (an earlier AUTHORED result has no usable outcome evidence, so it cannot
+   back a recording approval until re-checked). A VERIFIED result is never re-checked.
+
+**Follow-up after the final audit (2026-11-26):**
+
+- **The paid authoring confirmation names the exact tests.** `authoringSelection` (`designs.ts`) is
+  the one selection: the job uses it when it starts, and the view exposes it as `authoringPlan`
+  (`{tests: [{slug, testCid, testFile}], available, reason}`, with `verificationPlan` for the
+  verification run, always every test). The page builds its confirmation text and button label
+  only from that list (`apps/web/src/runPlan.ts`, no selection logic), lists the tests in the
+  dialog, and says why a run (the first unmet gate, or the selection's refusal) or a re-check (the
+  view's `recheckReason`) is not available. The tests check that the planned files are exactly
+  the files Kane was given, for a full and a selective authoring run and for a verification run,
+  and that the page's refusal reason is the backend's, word for word.
+- **The start request is bound to the confirmed list.** An authoring request must carry
+  `confirm.tests`: the content ids the dialog showed (each once, at most 20; anything else is a
+  400 before any Kane read). They are compared, as a set, with `authoringSelection` twice: first
+  against the latest design read (what the page's list came from), before any Kane process
+  starts, and again after the fresh read, right before the run is recorded and Kane starts. Any
+  difference (a missing, an extra, an unknown test, or a selection that changed after the
+  confirmation) is a 409 naming both lists; nothing runs and no credits are used. The page
+  reloads and asks for a new confirmation. Verification runs are not bound to a list (they
+  always replay every test); every other paid-run safeguard is unchanged.
+- **Each rejected test is paired with its scenario** in the corrective instruction
+  ("t-2 (scenario sc-3, ac-4): …"). The real two-test case is 873 bytes (cap 1,200), and its
+  opening message is measured with Kane's installed size function, like the plain evolve's.
+- **Order of the free re-check:** it repeats the store check, which accepts only execution
+  records after the run. Any new Kane record first (an approval write, a design or an evolve)
+  makes it refused, with nothing recorded. So the real run's checker-3 re-check comes before
+  anything else in Phase B.
+- **When the corrective evolve fails:** a broken keep rule (for example a re-emitted kept
+  scenario), a failed or an interrupted run all leave the design blocked by its check. The
+  exception is used up (a run refused before Kane started does not count): no second corrective
+  evolve, plain evolve, design or redesign of this use-case version starts, the credits are spent,
+  and recovering needs a new, recorded decision.
+
+**The expected sequence (each paid step approved separately):** a free re-check of
+`x20261126-112315-3549ed` with checker 3; the recording decisions (approve t-4, reject t-2 and t-3);
+the corrective evolve (about 18 credits); a free design read, which must show t-4, sc-5 and the
+criteria kept and every fingerprint unchanged; review and Kane approval writes for the new tests and
+a dry run (free); an authoring run of only the two new tests (estimated 60 to 80 credits); their
+recording review with the evidence gate; a fresh dry run; and the verification of all three tests
+(a pure replay; cost measured).
+
+**Tests:** `assurance-yaml-runkind.test.ts` (the real result.yaml steps block, anchors and aliases,
+every unsupported YAML feature, unreadable pack files, the real merged pack shape verifying with
+unchanged rules, the recorded checks the review rejected staying rejected, and every run-kind
+case); `assurance-design-check.test.ts` (only kept content ids may come from an earlier
+generation); `assurance-design-execution.test.ts`, with the fake Kane writing real-shaped packs:
+per-test recording review (a weak recorded check refused, only that test recorded again, the
+others kept, verification covering all three), a subset run changing another test's recording (a
+mutation, that approval stale), checker 3 re-checking an older AUTHORED result before an approval (and refusing the paid
+authoring run a free re-check makes unnecessary),
+the corrective evolve end to end (refusals, the exact instruction, every file and recording
+unchanged, kept items accepted from generation 2, only the new test recorded, all three verified),
+and two corrective evolves that break the keep rules (both blocked). Existing tests were updated
+where the stricter rules changed the expected result (checker version 3, no authoring when every
+recording is approved).

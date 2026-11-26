@@ -166,6 +166,8 @@ export interface DesignSnapshot {
   supersededTestFiles?: { path: string; sha256: string; id: string; testCid: string; supersededInSeq: number; successor: string | null }[];
   /** The latest evolve of this use case: what it changed that it must not have (null: none started). */
   evolveScope?: { jobId: string; checked: boolean; late: boolean; problems: string[] } | null;
+  /** Content ids a checked corrective evolve kept from an earlier generation (section 13.13); null: none. */
+  correctiveKeep?: string[] | null;
   /** Every design item a design record of this use case superseded, with Kane's recorded reason. */
   supersessions?: { seq: number; label: string; old: string; next: string | null; reason: string; recognised: boolean }[];
   /** Kane's generated variables file, read only; KaneVerity never writes it. */
@@ -384,7 +386,9 @@ function generationCheck(s: DesignSnapshot): DesignEvaluation['generation'] {
     notes.push(`The criteria phase is recorded only in generation ${from ?? '?'}; generation ${latest} carries those criteria forward. A later "--phase" run may ask for the criteria phase again.`);
   }
   for (const x of [...s.scenarios, ...s.tests]) {
-    if (x.generation !== latest) problems.push(`${x.slug ?? x.cid.slice(0, 19)} is live but was made in generation ${x.generation ?? '?'}, not the latest (${latest}).`);
+    // Only an item a checked corrective evolve kept, by exact content id, may come from an earlier generation.
+    if (x.generation !== latest && (s.correctiveKeep ?? []).includes(x.cid)) notes.push(`${x.slug ?? x.cid.slice(0, 19)} comes from generation ${x.generation ?? '?'} and was kept, unchanged, by the corrective evolve.`);
+    else if (x.generation !== latest) problems.push(`${x.slug ?? x.cid.slice(0, 19)} is live but was made in generation ${x.generation ?? '?'}, not the latest (${latest}).`);
   }
   for (const a of s.acs) {
     if (a.generation === null || a.generation > latest) problems.push(`Criterion ${a.slug ?? a.cid.slice(0, 19)} has no design generation at or before ${latest}.`);

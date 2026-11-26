@@ -133,7 +133,10 @@ before(async () => {
   Object.assign(process.env, {
     KANEVERITY_DATA_DIR: path.join(work, 'data'),
     KANEVERITY_ASSURANCE_MODE: 'free',
-    KANEVERITY_ASSURANCE_TIMEOUT_MS: '8000',
+    // Test-only limit for one fake-Kane process (production: 30 minutes). These files spawn up to
+    // ~1,600 node processes each; under full-suite load (three files at a time) a process start
+    // was measured at up to 10 s, so 8 s killed healthy reads. 30 s is 3x the worst seen.
+    KANEVERITY_ASSURANCE_TIMEOUT_MS: '30000',
     KANEVERITY_REVIEWER: 'test-reviewer',
     KANE_CLI_ENTRY: path.join(TESTS_DIR, 'fake-kane-assurance.cjs'),
     KANEVERITY_DOCS_CONTENT_DIR: contentDir,

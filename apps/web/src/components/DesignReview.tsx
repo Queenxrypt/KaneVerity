@@ -7,6 +7,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api.ts';
+import { confirmedIds, confirmText, planSlugs, selectionChangedNote, startLabel, type RunPlan } from '../runPlan.ts';
 import { Card, ErrorNote, formatTime } from './ui.tsx';
 import type { DesignDecisionView, DesignExecutionView, DesignReviewResponse, DesignTestView, UseCasesResponse } from '../types.ts';
 
@@ -28,7 +29,7 @@ function DecisionState({ d }: { d: DesignDecisionView | undefined }) {
   );
 }
 
-function Decide({ d, disabled, onDecide, ack }: { d: DesignDecisionView | undefined; disabled: boolean; onDecide: (decision: 'approve' | 'reject' | 'acknowledge', reason: string, acknowledgeStale: boolean) => void; ack?: { stale: boolean } }) {
+function Decide({ d, disabled, onDecide, ack, approveBlocked }: { d: DesignDecisionView | undefined; disabled: boolean; onDecide: (decision: 'approve' | 'reject' | 'acknowledge', reason: string, acknowledgeStale: boolean) => void; ack?: { stale: boolean }; /** Why approving is not possible (rejecting still is). */ approveBlocked?: string }) {
   const [reason, setReason] = useState('');
   const [staleOk, setStaleOk] = useState(false);
   return (
@@ -48,7 +49,7 @@ function Decide({ d, disabled, onDecide, ack }: { d: DesignDecisionView | undefi
         </>
       ) : (
         <>
-          <button type="button" disabled={disabled} onClick={() => onDecide('approve', reason, false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-medium hover:bg-slate-50 disabled:opacity-50">
+          <button type="button" disabled={disabled || !!approveBlocked} title={approveBlocked ?? ''} onClick={() => onDecide('approve', reason, false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-medium hover:bg-slate-50 disabled:opacity-50">
             Approve
           </button>
           <button type="button" disabled={disabled || !reason.trim()} onClick={() => onDecide('reject', reason, false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-medium hover:bg-slate-50 disabled:opacity-50">
@@ -159,13 +160,18 @@ function RecordingsSection({ data, disabled, decide, onRead }: { data: DesignRev
               <Badge ok={r.ok} yes="OK" no="NOT READY" />
             </div>
             {!r.ok && r.reason && <p className="mt-1 text-slate-700">{r.reason}</p>}
+            {r.exists && (
+              <p className={`mt-1 ${r.evidence.ok ? 'text-pass' : 'text-fail'}`} data-testid="design-recording-evidence">
+                {r.evidence.ok ? "Recorded check meets the outcome evidence rules (checked on the authoring run's pack)." : `Recorded check cannot be approved: ${r.evidence.reason}.`}
+              </p>
+            )}
             {r.exists &&
               (r.resultMd ? (
                 <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-slate-50 p-2 font-mono text-[11px]">{r.resultMd}</pre>
               ) : (
                 <p className="mt-1 text-fail">Kane's Result.md is missing, so this recording cannot be reviewed.</p>
               ))}
-            {r.exists && <Decide d={d} disabled={disabled || !r.resultMd} onDecide={decide('recording', r.testCid)} />}
+            {r.exists && <Decide d={d} disabled={disabled || !r.resultMd} approveBlocked={r.evidence.ok ? undefined : r.evidence.reason} onDecide={decide('recording', r.testCid)} />}
           </div>
         );
       })}
@@ -187,36 +193,45 @@ function evidenceText(o: OutcomeView) {
 }
 
 /** The paid runs (mode "all", explicit confirmation): authoring records the tests; verification is a pure replay. */
-function ExecutionSection({ data, busy, onRun, onReconcile }: { data: DesignReviewResponse; busy: boolean; onRun: (phase: Phase) => void; onReconcile: (executionId: string) => void }) {
+function ExecutionSection({ data, busy, onRun, onReconcile, onRecheck }: { data: DesignReviewResponse; busy: boolean; onRun: (phase: Phase, tests: string[]) => void; onReconcile: (executionId: string) => void; onRecheck: (executionId: string) => void }) {
   const [confirming, setConfirming] = useState<Phase | null>(null);
+  const [confirmRecheck, setConfirmRecheck] = useState(false);
   const x = data.execution;
-  const authorReady = !!data.readiness?.ready;
-  const verifyReady = !!data.verificationReadiness?.ready;
+  // The backend's run plans: the exact tests each run gives Kane (the selection the job uses).
+  const plans: Record<Phase, RunPlan | undefined> = { authoring: data.authoringPlan, verification: data.verificationPlan };
+  const authorReady = !!data.authoringPlan?.available;
+  const verifyReady = !!data.verificationPlan?.available;
   const n = data.design?.tests.length ?? 0;
-  const text: Record<Phase, string> = {
-    authoring: `The authoring run runs the ${n} approved tests in a browser so Kane records them. It uses Kane credits. Its result is AUTHORED at best, never VERIFIED: you review the recordings next.`,
-    verification: `The verification run replays the ${n} approved recordings in a browser, with no re-recording. It uses Kane credits. It is VERIFIED only if Kane replayed every step and the evidence reads each documented outcome from the page.`,
-  };
   return (
     <section data-testid="design-execution">
       <h3 className="text-sm font-semibold">Test runs</h3>
       {data.mode !== 'all' ? (
         <p className="text-xs text-slate-600">Running the tests uses Kane credits, so it needs Assurance mode "all" (KANEVERITY_ASSURANCE_MODE, then restart the orchestrator).</p>
-      ) : confirming ? (
+      ) : confirming && plans[confirming] ? (
         <div className="mt-1 rounded-md border border-review/40 bg-review-soft p-2 text-xs" data-testid="design-execute-confirm">
-          {text[confirming]} Every gate is checked again just before Kane starts. A run that ends without a known result is never re-run automatically.
+          {confirmText(confirming, plans[confirming]!, n)} Every gate is checked again just before Kane starts. A run that ends without a known result is never re-run automatically.
+          <ul className="mt-1 list-inside list-disc font-mono" data-testid="design-execute-tests">
+            {plans[confirming]!.tests.map((t) => (
+              <li key={t.testCid}>
+                {t.slug ?? t.testCid.slice(0, 19)} <span className="text-slate-500">{t.testFile?.split('/').pop()}</span>
+              </li>
+            ))}
+          </ul>
           <div className="mt-2 flex gap-2">
             <button
               type="button"
-              disabled={busy}
+              disabled={busy || !plans[confirming]!.available}
               onClick={() => {
                 const ph = confirming;
+                // The exact tests this dialog showed: the backend refuses the run if they changed.
+                const tests = confirmedIds(plans[ph]!);
                 setConfirming(null);
-                onRun(ph);
+                onRun(ph, tests);
               }}
               className="rounded-md bg-slate-900 px-3 py-1.5 font-semibold text-white disabled:opacity-50"
+              data-testid="design-execute-start"
             >
-              Start the {confirming} run (uses credits)
+              {startLabel(confirming, plans[confirming]!)}
             </button>
             <button type="button" onClick={() => setConfirming(null)} className="rounded-md border border-slate-300 bg-white px-3 py-1.5">
               Cancel
@@ -225,12 +240,18 @@ function ExecutionSection({ data, busy, onRun, onReconcile }: { data: DesignRevi
         </div>
       ) : (
         <div className="mt-1 flex flex-wrap gap-2">
-          <button type="button" disabled={busy || !authorReady} onClick={() => setConfirming('authoring')} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium hover:bg-slate-50 disabled:opacity-50" data-testid="design-execute-authoring" title={authorReady ? '' : 'The authoring gates must pass first.'}>
-            1. Authoring run…
+          <button type="button" disabled={busy || !authorReady} onClick={() => setConfirming('authoring')} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium hover:bg-slate-50 disabled:opacity-50" data-testid="design-execute-authoring" title={data.authoringPlan?.reason ?? ''}>
+            1. Authoring run{authorReady && data.authoringPlan ? ` (${planSlugs(data.authoringPlan).join(', ')})` : ''}…
           </button>
-          <button type="button" disabled={busy || !verifyReady} onClick={() => setConfirming('verification')} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium hover:bg-slate-50 disabled:opacity-50" data-testid="design-execute-verification" title={verifyReady ? '' : 'The verification gates must pass first.'}>
+          <button type="button" disabled={busy || !verifyReady} onClick={() => setConfirming('verification')} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium hover:bg-slate-50 disabled:opacity-50" data-testid="design-execute-verification" title={data.verificationPlan?.reason ?? ''}>
             2. Verification run…
           </button>
+        </div>
+      )}
+      {data.mode === 'all' && !confirming && (
+        <div className="mt-1 space-y-0.5 text-xs text-slate-600" data-testid="design-run-unavailable">
+          {!authorReady && data.authoringPlan?.reason && <p>Authoring run not available: {data.authoringPlan.reason}</p>}
+          {!verifyReady && data.verificationPlan?.reason && <p>Verification run not available: {data.verificationPlan.reason}</p>}
         </div>
       )}
       {x && (
@@ -260,6 +281,45 @@ function ExecutionSection({ data, busy, onRun, onReconcile }: { data: DesignRevi
             </p>
           )}
           <p className="mt-1 text-slate-700">{x.reason}</p>
+          {x.recheckOf && (
+            <p className="mt-1 text-slate-600" data-testid="design-recheck-of">
+              Earlier result (checker version {x.recheckOf.checker}, {formatTime(x.recheckOf.at)}): {x.recheckOf.verdict.replace('_', ' ')}
+              {x.recheckOf.problems.length > 0 ? ` — ${x.recheckOf.problems.join(' ')}` : ''}. It is kept in the history.
+            </p>
+          )}
+          {(x.evidenceFile || x.testPacks.length > 0 || x.kaneRun) && (
+            <p className="mt-1 text-slate-600" data-testid="design-run-packs">
+              {x.kaneRun && <>Kane reported: {x.kaneRun.overallStatus ?? 'no status'}{x.kaneRun.totals ? ` (${x.kaneRun.totals.passed}/${x.kaneRun.totals.tests} passed)` : ''}. </>}
+              {x.evidenceFile && <>Evidence checked: combined pack <span className="font-mono">{x.evidenceFile}</span>. </>}
+              {x.testPacks.length > 0 && <>Per-test packs kept: {x.testPacks.length}.</>}
+            </p>
+          )}
+          {x.members.length > 0 && (
+            <table className="mt-1 w-full text-left" data-testid="design-run-members">
+              <thead className="text-slate-500">
+                <tr>
+                  <th className="pr-2 font-medium">Outcome</th>
+                  <th className="pr-2 font-medium">Test</th>
+                  <th className="pr-2 font-medium">Kane</th>
+                  <th className="pr-2 font-medium">In combined pack</th>
+                  <th className="font-medium">Recording</th>
+                </tr>
+              </thead>
+              <tbody className="text-slate-700">
+                {x.members.map((m) => (
+                  <tr key={m.testFile}>
+                    <td className="pr-2 font-mono">{m.outcome}</td>
+                    <td className="pr-2">
+                      <span className="font-mono">{m.testSlug}</span> <span className="text-slate-500">{m.testFile.split('/').pop()}</span>
+                    </td>
+                    <td className="pr-2">{m.kaneStatus ?? '—'}{m.durationS !== null ? ` (${m.durationS}s)` : ''}</td>
+                    <td className="pr-2">{m.packMemberStatus ?? 'not found'}</td>
+                    <td>{m.recording.exists ? <span className="font-mono">{(m.recording.sha256 ?? '').slice(0, 12)}</span> : 'none'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
           {x.mutation.length > 0 && <p className="mt-1 text-fail">Changed during the run: {x.mutation.join(' ')}</p>}
           {x.problems.length > 0 && <p className="mt-1 text-fail">{x.problems.join(' ')}</p>}
           {x.packProblems.length > 0 && <p className="mt-1 text-fail">Evidence pack: {x.packProblems.join(' ')}</p>}
@@ -290,6 +350,38 @@ function ExecutionSection({ data, busy, onRun, onReconcile }: { data: DesignRevi
               Reconcile (check what it left; never re-runs)
             </button>
           )}
+          {!x.canRecheck && (x.state === 'finished' || x.state === 'rechecked') && x.recheckReason && (
+            <p className="mt-1 text-slate-500" data-testid="design-recheck-unavailable">
+              Re-check not available: {x.recheckReason}
+            </p>
+          )}
+          {x.canRecheck &&
+            (confirmRecheck ? (
+              <div className="mt-2 rounded-md border border-slate-300 bg-slate-50 p-2" data-testid="design-recheck-confirm">
+                KaneVerity checks this run's evidence again with its current checker. Kane is not run and no credits are used. It reads Kane's saved output, the evidence packs and the recordings, and refuses if any of them changed since the run. This is allowed once per checker version; the earlier result stays in the history.
+                <div className="mt-2 flex gap-2">
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => {
+                      setConfirmRecheck(false);
+                      onRecheck(x.executionId);
+                    }}
+                    className="rounded-md bg-slate-900 px-3 py-1.5 font-semibold text-white disabled:opacity-50"
+                    data-testid="design-recheck-start"
+                  >
+                    Re-check (free)
+                  </button>
+                  <button type="button" onClick={() => setConfirmRecheck(false)} className="rounded-md border border-slate-300 bg-white px-3 py-1.5">
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button type="button" disabled={busy} onClick={() => setConfirmRecheck(true)} className="mt-2 rounded-md border border-slate-300 bg-white px-2 py-1 font-medium hover:bg-slate-50 disabled:opacity-50" data-testid="design-recheck">
+                Re-check this run's evidence (free; Kane is not run again)…
+              </button>
+            ))}
         </div>
       )}
     </section>
@@ -367,7 +459,8 @@ function DesignReviewCard({ tutorialId, ucCid, ucSlug }: { tutorialId: string; u
       setData(await fn());
       setNotice(message);
     } catch (e) {
-      setError((e as Error).message);
+      const m = (e as Error).message;
+      setError(selectionChangedNote(m) ?? m);
       void load();
     } finally {
       setBusy(false);
@@ -610,7 +703,7 @@ function DesignReviewCard({ tutorialId, ucCid, ucSlug }: { tutorialId: string; u
             </section>
           )}
 
-          <ExecutionSection data={data} busy={busy} onRun={(phase) => act(() => api.executeDesign(tutorialId, ucCid, phase), `${phase === 'authoring' ? 'Authoring' : 'Verification'} run started. The result is checked from Kane's evidence.`)} onReconcile={(id) => act(() => api.reconcileExecution(tutorialId, ucCid, id), 'Run reconciled from what it left. It was not run again.')} />
+          <ExecutionSection data={data} busy={busy} onRun={(phase, tests) => act(() => api.executeDesign(tutorialId, ucCid, phase, phase === 'authoring' ? tests : undefined), `${phase === 'authoring' ? 'Authoring' : 'Verification'} run started. The result is checked from Kane's evidence.`)} onReconcile={(id) => act(() => api.reconcileExecution(tutorialId, ucCid, id), 'Run reconciled from what it left. It was not run again.')} onRecheck={(id) => act(() => api.recheckExecution(tutorialId, ucCid, id), 'Run re-checked from what it left. Kane was not run again.')} />
 
           <section>
             <h3 className="text-sm font-semibold">Design records</h3>
